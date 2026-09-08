@@ -41,6 +41,7 @@ class DataConfig:
     skip_offset: int = 0
     diffusion_samples: int = 1
     output_dir: Optional[str] = None
+    seed: Optional[int] = None
   
    
 
@@ -127,6 +128,7 @@ class PredictionDataset(torch.utils.data.Dataset):
         disulfide_prob: float = 1.0,
         disulfide_on: bool = False,
         skip_offset: int = 0,
+        seed: Optional[int] = None,
     ) -> None:
         """Initialize the training dataset.
 
@@ -178,6 +180,7 @@ class PredictionDataset(torch.utils.data.Dataset):
         self.compute_affinity = compute_affinity
         self.disulfide_prob = disulfide_prob
         self.disulfide_on = disulfide_on
+        self.seed = seed
 
         self.mols = {}
         self.parser = YamlDesignParser(mol_dir=self.moldir)
@@ -192,13 +195,22 @@ class PredictionDataset(torch.utils.data.Dataset):
 
         """
         path = Path(self.yaml_paths[idx % len(self.yaml_paths)])
-        feat = self.get_sample(path)
+        sample_seed = None if self.seed is None else self.seed + idx
+        feat = self.get_sample(
+            path,
+            rng=np.random.default_rng(sample_seed),
+        )
         data_sample_idx = idx // len(self.yaml_paths) + self.skip_offset
         if self.dataset.multiplicity > 1:
             feat["data_sample_idx"] = data_sample_idx
         return feat
 
-    def get_sample(self, path: Path, sample_id: Optional[str] = None) -> Dict:
+    def get_sample(
+        self,
+        path: Path,
+        sample_id: Optional[str] = None,
+        rng: Optional[np.random.Generator] = None,
+    ) -> Dict:
         # Get itemn also needs to take a smaple id as input
         parsed = self.parser.parse_yaml(
             path, mol_dir=self.moldir, mols=self.mols
@@ -263,7 +275,7 @@ class PredictionDataset(torch.utils.data.Dataset):
         features = self.dataset.featurizer.process(
             input_data,
             molecules=molecules,
-            random=np.random.default_rng(None),
+            random=rng if rng is not None else np.random.default_rng(None),
             training=False,
             max_seqs=1,
             backbone_only=self.backbone_only,
@@ -382,6 +394,7 @@ class FromYamlDataModule(pl.LightningDataModule):
             disulfide_prob=cfg.disulfide_prob,
             disulfide_on=cfg.disulfide_on,
             skip_offset=cfg.skip_offset,
+            seed=getattr(cfg, "seed", None),
         )
 
     def predict_dataloader(self) -> DataLoader:

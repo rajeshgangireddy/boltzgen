@@ -26,6 +26,7 @@ from boltzgen.model.loss.diffusion import (
     weighted_rigid_align,
     weighted_rigid_centering,
 )
+from boltzgen.utils.timing import Timer
 from boltzgen.model.modules.encoders import (
     AtomAttentionDecoder,
     AtomAttentionEncoder,
@@ -45,6 +46,7 @@ from boltzgen.model.modules.utils import (
     default,
     log,
 )
+from boltzgen.utils.device import autocast_disabled
 from scipy.stats import beta
 
 
@@ -569,7 +571,8 @@ class AtomDiffusion(Module):
             use_tqdm=inference_logging,
             desc="Denoising steps.",
         ):
-            sigma_tm, sigma_t, gamma = sigma_tm.item(), sigma_t.item(), gamma.item()
+            with Timer("diffusion.item_sync", level="detail"):
+                sigma_tm, sigma_t, gamma = sigma_tm.item(), sigma_t.item(), gamma.item()
             # sigma_tm is sigma_t-1 and sigma_t is sigma_t
             t_hat = sigma_tm * (1 + gamma)
             noise_var = noise_scale**2 * (t_hat**2 - sigma_tm**2)
@@ -588,24 +591,26 @@ class AtomDiffusion(Module):
             atom_coords_noisy = atom_coords + eps
 
             with torch.no_grad():
-                atom_coords_denoised, net_out = self.preconditioned_network_forward(
-                    atom_coords_noisy,
-                    t_hat,
-                    training=False,
-                    network_condition_kwargs=dict(
-                        multiplicity=multiplicity,
-                        **network_condition_kwargs,
-                    ),
-                )
+                with Timer("diffusion.score_model_forward", level="detail"):
+                    atom_coords_denoised, net_out = self.preconditioned_network_forward(
+                        atom_coords_noisy,
+                        t_hat,
+                        training=False,
+                        network_condition_kwargs=dict(
+                            multiplicity=multiplicity,
+                            **network_condition_kwargs,
+                        ),
+                    )
 
             if self.alignment_reverse_diff:
-                with torch.autocast("cuda", enabled=False):
-                    atom_coords_noisy = weighted_rigid_align(
-                        atom_coords_noisy.float(),
-                        atom_coords_denoised.float(),
-                        atom_mask.float(),
-                        atom_mask.float(),
-                    )
+                with autocast_disabled():
+                    with Timer("diffusion.rigid_align", level="detail"):
+                        atom_coords_noisy = weighted_rigid_align(
+                            atom_coords_noisy.float(),
+                            atom_coords_denoised.float(),
+                            atom_mask.float(),
+                            atom_mask.float(),
+                        )
 
                 atom_coords_noisy = atom_coords_noisy.to(atom_coords_denoised)
 
@@ -709,7 +714,7 @@ class AtomDiffusion(Module):
         residue_type_weight=0.0,
         multiplicity=1,
     ):
-        with torch.autocast("cuda", enabled=False):
+        with autocast_disabled():
             denoised_atom_coords = out_dict["denoised_atom_coords"].float()
             noised_atom_coords = out_dict["noised_atom_coords"].float()
             sigmas = out_dict["sigmas"].float()

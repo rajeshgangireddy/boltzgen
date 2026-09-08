@@ -18,6 +18,7 @@ from boltzgen.data import const
 from boltzgen.model.validation import design
 from boltzgen.task.analyze.analyze import Analyze
 from boltzgen.task.predict.data_from_generated import collate
+from boltzgen.utils.device import empty_cache
 from boltzgen.task.predict.writer import AffinityWriter, FoldingWriter
 
 
@@ -299,10 +300,11 @@ class RefoldingValidator(design.DesignValidator):
         self.folding_model = None
         del self.affinity_model
         self.affinity_model = None
-        torch._C._cuda_clearCublasWorkspaces()
+        if torch.cuda.is_available():
+            torch._C._cuda_clearCublasWorkspaces()
         torch._dynamo.reset()
         gc.collect()
-        torch.cuda.empty_cache()
+        empty_cache()
 
         # Compute standard metrics
         self.common_on_epoch_end(model, logname="val_monomer_ligand")

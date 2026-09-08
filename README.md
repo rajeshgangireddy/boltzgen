@@ -1,3 +1,4 @@
+> This is a fork of [BoltzGen](https://github.com/HannesStark/boltzgen) that adds support for Intel GPUs (XPU), in addition to the original NVIDIA CUDA support.
 
 <div align="center">
   <div>&nbsp;</div>
@@ -10,15 +11,19 @@
 </div>
 
 # Installation
-In an environment with python >=3.11:
+Clone this repo, then install with [`uv`](https://docs.astral.sh/uv/), picking the extra that matches your hardware (Intel GPU, NVIDIA GPU, or CPU-only):
 ```bash
-pip install boltzgen
+uv sync --extra xpu    # Intel GPU
+uv sync --extra cuda   # NVIDIA GPU
+uv sync --extra cpu    # CPU only (no GPU; slow, for dev/testing)
 ```
 
 <details>
   <summary style="font-size: 1.3em; font-weight: 600;">
     Click for detailed installation instructions
   </summary>
+
+> **Note:** Steps 1-3 (Miniconda) are only needed for the `pip`-based path below. `uv` manages its own virtual environment, so if you're using `uv` you can skip straight to step 4.
 
 ### 1 - Install Miniconda
 
@@ -47,16 +52,17 @@ conda activate bg
 
 ### 4 - Install BoltzGen
 
-Run the command below to install BoltzGen from PyPI:
+With [`uv`](https://docs.astral.sh/uv/) (recommended - automatically fetches the right `torch` build for your extra):
 
 ```bash
-pip install boltzgen
+uv sync --extra xpu   # or --extra cuda / --extra cpu
 ```
 
-Alternatively, if you prefer to install an editable, locally-managed copy, download the BoltzGen repository, change directory into the boltzgen directory, and install BoltzGen from source:
+With plain `pip`, install the matching `torch` build first (`pip` doesn't know about backend extras the way `uv` does), then install BoltzGen with the same extra for the remaining backend-specific dependencies:
 
 ```bash
-pip install -e .
+pip install torch --index-url https://download.pytorch.org/whl/xpu   # or /cu130, or /cpu
+pip install -e ".[xpu]"   # or ".[cuda]" / ".[cpu]"
 ```
 </details>
 
@@ -64,6 +70,8 @@ pip install -e .
   <summary style="font-size: 1.3em; font-weight: 600;">
     Click for optional Docker instructions if you prefer Docker
   </summary>
+
+> ⚡ **XPU:** The current `Dockerfile` is NVIDIA/CUDA-only. An Intel XPU Docker image is planned/coming soon - for now, use the `uv`/`pip` install path above on Intel GPU hosts.
 
 To build and run the docker image:
 
@@ -88,10 +96,12 @@ docker build -t boltzgen:weights --build-arg DOWNLOAD_WEIGHTS=true .
 </details>
 <br>
 
+> The rest of this README (below) is unchanged from the original BoltzGen README.
 
 # Running BoltzGen
 ![alt text](assets/fig1.png)
 
+> ⚡ **XPU:** No special flag is needed - the accelerator (CUDA/XPU/CPU) is auto-detected from whichever `torch` build is installed. Leave `--use_kernels` at its default (`auto`); it already resolves to `false` on XPU (the fused cuEquivariance triangle-attention kernels are CUDA-only, so `trunk`/`confidence` steps fall back to plain PyTorch and run slower than on an equivalent NVIDIA GPU).
 
 `boltzgen run` takes a [design specification](#how-to-make-a-design-specification-yaml) `.yaml` and produces a set of ranked designs.\
 ⚠️ it downloads models (~6GB) to `~/.cache`. This can by changed by passing `--cache YOUR_PATH` or by setting `$HF_HOME`.\
@@ -422,7 +432,7 @@ The `boltzgen run` command executes the BoltzGen binder design pipeline. Here ar
 - `--devices DEVICES` - Number of devices to use. Default is all devices available.
 - `--num_workers NUM_WORKERS` - Number of DataLoader worker processes.
 - `--config_dir CONFIG_DIR` - Path to the directory of default config files. Default: `src/boltzgen/resources/config`
-- `--use_kernels {auto,true,false}` - Whether to use kernels. One of 'auto', 'true', or 'false'. Default: auto. If 'auto', will use kernels if the device capability is >= 8.
+- `--use_kernels {auto,true,false}` - Whether to use kernels. One of 'auto', 'true', or 'false'. Default: auto. If 'auto', will use kernels if the device capability is >= 8. ⚡ **XPU:** these are the CUDA-only cuEquivariance fused kernels; `auto` correctly resolves to `false` on XPU (there is no XPU kernel implementation), and passing `--use_kernels true` on XPU will warn and then fail (cuEquivariance isn't installed unless you used the `cuda` extra).
 - `--moldir MOLDIR` - Path to the moldir. Default: `huggingface:boltzgen/inference-data:mols.zip`
 - `--reuse` - Reuse existing results across all steps. Generate only as many new designs are needed to achieve the specified total number of designs.
 
@@ -550,9 +560,12 @@ boltzgen merge [-h] --output OUTPUT source [source ...]
 # Training BoltzGen models
 Install in dev mode which will install additional packages like `wandb`.
 ```bash
-git clone https://github.com/HannesStark/boltzgen
-pip install -e .[dev]
+git clone https://github.com/rajeshgangireddy/boltzgen
+uv sync --extra cuda --extra dev   # or --extra xpu / --extra cpu instead of cuda
 ```
+
+> ⚡ **XPU:** Only inference (`predict`/`analyze`/`filter`) has been validated on Intel GPUs so far; the training path (forward + backward + optimizer step + checkpoint save/load) has **not** been verified on XPU yet. CUDA remains the recommended/supported backend for training.
+
 ### 1 – Download training data and checkpoints
 ```bash
 # Choose any location; this is default in yaml files

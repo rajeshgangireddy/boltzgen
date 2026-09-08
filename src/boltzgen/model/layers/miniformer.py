@@ -11,6 +11,7 @@ from boltzgen.model.layers.transition import Transition
 from boltzgen.model.layers.triangular import (
     MiniTriangularUpdate
 )
+from boltzgen.utils.device import autocast_disabled
 
 
 class MiniformerModule(nn.Module):
@@ -120,7 +121,7 @@ class MiniformerLayer(nn.Module):
         z = z + self.transition_z(z)
 
         # Compute sequence stack
-        with torch.autocast("cuda", enabled=False):
+        with autocast_disabled():
             s_normed = self.pre_norm_s(s.float())
             s = s.float() + self.attention(
                 s=s_normed, z=z.float(), mask=mask.float(), k_in=s_normed

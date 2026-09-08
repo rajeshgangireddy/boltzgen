@@ -8,12 +8,19 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "boltzgen"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.13"
 version = "0.3.2"
 readme = { file = "PYPI_DESCRIPTION.md", content-type = "text/markdown" }
 description = "Protein design"
 dependencies = [
     # Add runtime dependencies here
+    # NOTE: `torch` itself is intentionally NOT listed here. It is declared
+    # per-backend under [project.optional-dependencies] (cpu/cuda/xpu) so
+    # that `uv sync --extra {cpu,cuda,xpu}` installs the matching wheel from
+    # the matching PyTorch index (see [tool.uv.sources]/[tool.uv.index]
+    # below). One of those three extras MUST be selected. Plain `pip`
+    # installs (which don't understand [tool.uv.sources]) should install
+    # the desired `torch` build manually first - see README.
     "numpy==2.0.2",
     "numba==0.61.0",
     "matplotlib",
@@ -22,7 +29,6 @@ dependencies = [
     "pydssp",
     "logomaker",
     "gemmi>=0.6.5",  # Supports both 0.6.x and 0.7.x (see mmcif.py for compatibility layer)
-    "torch>=2.4.1",
     "scikit-learn",
     "hydra-core",
     "edit_distance",
@@ -33,10 +39,6 @@ dependencies = [
     "einx",
     "einops",
     "mashumaro",
-    "nvidia-ml-py>=12.535.133",
-    "cuequivariance_ops_cu12>=0.5.0",
-    "cuequivariance_ops_torch_cu12>=0.5.0",
-    "cuequivariance_torch>=0.5.0",
     "huggingface_hub",
     "biopython", 
 ]
@@ -58,6 +60,26 @@ boltzgen = ["resources/config/**/*"]
 boltzgen = "boltzgen.cli.boltzgen:main"
 
 [project.optional-dependencies]
+# Backend selection - pick exactly one. With `uv`, `torch` is routed to the
+# matching PyTorch wheel index automatically (see [tool.uv.sources] below):
+#   uv sync --extra cpu    # CPU-only (no GPU required; slow, for dev/testing)
+#   uv sync --extra cuda   # NVIDIA CUDA (cu130) + cuEquivariance fused kernels
+#   uv sync --extra xpu    # Intel XPU
+# Plain `pip` does not understand [tool.uv.sources]; pip users should
+# install the matching `torch` wheel manually first (see README), then
+# `pip install -e ".[cpu|cuda|xpu]"` for the remaining backend-specific deps.
+cpu = ["torch>=2.4.1"]
+cuda = [
+    "torch>=2.4.1",
+    "nvidia-ml-py>=12.535.133",
+    "cuequivariance_ops_cu12>=0.5.0",
+    "cuequivariance_ops_torch_cu12>=0.5.0",
+    "cuequivariance_torch>=0.5.0",
+]
+xpu = [
+    "torch>=2.4.1",
+    "triton-xpu>=3.7.0 ; sys_platform == 'win32' or sys_platform == 'linux'",
+]
 lint = ["ruff"]
 test = ["pytest"]
 doc = []
@@ -72,6 +94,50 @@ dev = [
     "boltzgen[doc]",
     "boltzgen[build]",
 ]
+
+[tool.uv]
+# cpu/cuda/xpu all provide `torch`, but from different, incompatible wheel
+# builds - only one may be selected per environment.
+conflicts = [
+    [
+        { extra = "cpu" },
+        { extra = "cuda" },
+        { extra = "xpu" },
+    ],
+]
+# GPU-accelerated torch wheels (cuda/xpu) are only published for Linux, and
+# this project's tooling (Docker, SLURM, Intel/NVIDIA GPU drivers) targets
+# Linux only - restrict the lock accordingly so `uv lock`'s cross-platform
+# resolution doesn't fail trying to satisfy the cuda/xpu extras on macOS.
+environments = ["sys_platform == 'linux'"]
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cpu", extra = "cpu" },
+    { index = "pytorch-cuda", extra = "cuda" },
+    { index = "pytorch-xpu", extra = "xpu" },
+]
+# `torch`'s XPU build depends on `triton-xpu`, which is only published (at
+# the versions torch actually needs) on PyTorch's own xpu index - the
+# same-named package on PyPI is a stale/unrelated placeholder.
+triton-xpu = [
+    { index = "pytorch-xpu", extra = "xpu" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cuda"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-xpu"
+url = "https://download.pytorch.org/whl/xpu"
+explicit = true
 
 [tool.ruff]
 src = ["src"]

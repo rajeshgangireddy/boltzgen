@@ -2,6 +2,7 @@ import torch
 from einops.layers.torch import Rearrange
 from torch import Tensor, nn
 import boltzgen.model.layers.initialize as init
+from boltzgen.utils.device import autocast_disabled
 
 
 class AttentionPairBias(nn.Module):
@@ -118,7 +119,7 @@ class AttentionPairBias(nn.Module):
         attn_mask = (1 - mask[:, None, None].float()) * -self.inf
         attn_mask = attn_mask + bias.float()
 
-        with torch.autocast("cuda", enabled=False):
+        with autocast_disabled():
             # Compute attention weights
             o = torch.nn.functional.scaled_dot_product_attention(
                 q.float(),
@@ -131,4 +132,3 @@ class AttentionPairBias(nn.Module):
         o = o * g
         o = self.proj_o(o)
         return o
-

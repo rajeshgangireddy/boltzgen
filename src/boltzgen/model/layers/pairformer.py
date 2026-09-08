@@ -18,6 +18,8 @@ from boltzgen.model.layers.triangular_attention.attention import (
     TriangleAttentionEndingNode,
     TriangleAttentionStartingNode,
 )
+from boltzgen.utils.device import autocast_disabled
+from boltzgen.utils.timing import Timer
 
 
 class PairformerModule(nn.Module):
@@ -145,41 +147,49 @@ class PairformerLayer(nn.Module):
         use_cuequiv_attn: bool = False,
     ) -> Tuple[Tensor, Tensor]:
         # Compute pairwise stack
-        dropout = get_dropout_mask(self.dropout, z, self.training)
-        z = z + dropout * self.tri_mul_out(
-            z, mask=pair_mask, use_kernels=use_cuequiv_mul or use_kernels
-        )
+        with Timer("pairformer_layer.tri_mul_out", level="detail"):
+            dropout = get_dropout_mask(self.dropout, z, self.training)
+            z = z + dropout * self.tri_mul_out(
+                z, mask=pair_mask, use_kernels=use_cuequiv_mul or use_kernels
+            )
 
-        dropout = get_dropout_mask(self.dropout, z, self.training)
-        z = z + dropout * self.tri_mul_in(
-            z, mask=pair_mask, use_kernels=use_cuequiv_mul or use_kernels
-        )
+        with Timer("pairformer_layer.tri_mul_in", level="detail"):
+            dropout = get_dropout_mask(self.dropout, z, self.training)
+            z = z + dropout * self.tri_mul_in(
+                z, mask=pair_mask, use_kernels=use_cuequiv_mul or use_kernels
+            )
 
-        dropout = get_dropout_mask(self.dropout, z, self.training)
-        z = z + dropout * self.tri_att_start(
-            z,
-            mask=pair_mask,
-            chunk_size=chunk_size_tri_attn,
-            use_kernels=use_cuequiv_attn or use_kernels,
-        )
+        with Timer("pairformer_layer.tri_att_start", level="detail"):
+            dropout = get_dropout_mask(self.dropout, z, self.training)
+            z = z + dropout * self.tri_att_start(
+                z,
+                mask=pair_mask,
+                chunk_size=chunk_size_tri_attn,
+                use_kernels=use_cuequiv_attn or use_kernels,
+            )
 
-        dropout = get_dropout_mask(self.dropout, z, self.training, columnwise=True)
-        z = z + dropout * self.tri_att_end(
-            z,
-            mask=pair_mask,
-            chunk_size=chunk_size_tri_attn,
-            use_kernels=use_cuequiv_attn or use_kernels,
-        )
+        with Timer("pairformer_layer.tri_att_end", level="detail"):
+            dropout = get_dropout_mask(self.dropout, z, self.training, columnwise=True)
+            z = z + dropout * self.tri_att_end(
+                z,
+                mask=pair_mask,
+                chunk_size=chunk_size_tri_attn,
+                use_kernels=use_cuequiv_attn or use_kernels,
+            )
 
-        z = z + self.transition_z(z)
+        with Timer("pairformer_layer.transition_z", level="detail"):
+            z = z + self.transition_z(z)
+
 
         # Compute sequence stack
-        with torch.autocast("cuda", enabled=False):
+        with autocast_disabled():
             s_normed = self.pre_norm_s(s.float())
-            s = s.float() + self.attention(
-                s=s_normed, z=z.float(), mask=mask.float(), k_in=s_normed
-            )
-            s = s + self.transition_s(s)
+            with Timer("pairformer_layer.attention_seq", level="detail"):
+                s = s.float() + self.attention(
+                    s=s_normed, z=z.float(), mask=mask.float(), k_in=s_normed
+                )
+            with Timer("pairformer_layer.transition_s", level="detail"):
+                s = s + self.transition_s(s)
             s = self.s_post_norm(s)
 
         return s, z

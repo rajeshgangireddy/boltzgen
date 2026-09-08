@@ -31,7 +31,7 @@ writer:
   write_native: false
 
 trainer:
-  accelerator: gpu
+  accelerator: auto
   devices: 1
   precision: 32
 

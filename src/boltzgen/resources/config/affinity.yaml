@@ -36,7 +36,7 @@ writer:
   design_dir: ${data.design_dir}
 
 trainer:
-  accelerator: gpu
+  accelerator: auto
   logger: false
   devices: 1
   precision: bf16-mixed

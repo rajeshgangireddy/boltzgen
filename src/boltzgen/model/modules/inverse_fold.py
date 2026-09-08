@@ -10,6 +10,7 @@ from boltzgen.data import const
 # Replace torch_scatter with native PyTorch implementation
 from boltzgen.model.modules.scatter_utils import scatter_sum, scatter_softmax
 import torch.nn.functional as F
+from boltzgen.utils.device import autocast_disabled
 
 
 class GaussianSmearing(torch.nn.Module):
@@ -470,7 +471,7 @@ class InverseFoldingEncoder(nn.Module):
             dim=-1,
         )
 
-        with torch.autocast("cuda", enabled=False):
+        with autocast_disabled():
             atom_to_token = feats["atom_to_token"].float()
             atom_to_token_mean = atom_to_token / (
                 atom_to_token.sum(dim=1, keepdim=True) + 1e-6

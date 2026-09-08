@@ -1,7 +1,7 @@
 _target_: boltzgen.task.train.train.Training
 
 trainer:
-  accelerator: gpu
+  accelerator: auto
   devices: 8
   precision: bf16-mixed
   gradient_clip_val: 10.0

@@ -51,6 +51,7 @@ from boltzgen.data import const
 from boltzgen.task.task import Task
 from boltzgen.data.data import Structure
 from boltzgen.data.write.mmcif import to_mmcif
+from boltzgen.utils.timing import Timer, flush_rollup
 
 
 class Analyze(Task):
@@ -236,8 +237,11 @@ class Analyze(Task):
         return sample_ids
 
     def run(self, config=None, run_prediction=False):
-        self.distribute_tasks()
-        self.aggregate_metrics()
+        with Timer("analyze.distribute_tasks", gpu=False):
+            self.distribute_tasks()
+        with Timer("analyze.aggregate_metrics", gpu=False):
+            self.aggregate_metrics()
+        flush_rollup()
 
     def distribute_tasks(self):
         # The rdkit thing is necessary to make multiprocessing with the rdkit molecules work.
@@ -358,7 +362,8 @@ class Analyze(Task):
 
         # Run clustering
         if self.run_clustering:
-            df = self.run_foldseek_clustering(df)
+            with Timer("analyze.run_foldseek_clustering", gpu=False):
+                df = self.run_foldseek_clustering(df)
         # Write individual metrics to disk
         csv_path = Path(self.design_dir) / f"aggregate_metrics_{self.name}.csv"
         df.to_csv(csv_path, float_format="%.5f", index=False)

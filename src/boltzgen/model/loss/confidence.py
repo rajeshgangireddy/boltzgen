@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 
-from boltzgen.data import const
+from boltzgen.utils.device import autocast_disabled
 from boltzgen.model.layers.confidence_utils import tm_function, compute_frame_pred
 
 
@@ -77,7 +77,7 @@ def resolved_loss(
     multiplicity=1,
     mask_loss=None,
 ):
-    with torch.autocast("cuda", enabled=False):
+    with autocast_disabled():
         if token_level_confidence:
             token_to_rep_atom = feats["token_to_rep_atom"]
             token_to_rep_atom = token_to_rep_atom.repeat_interleave(
@@ -128,7 +128,7 @@ def get_target_lddt(
     token_level_confidence=True,
     multiplicity=1,
 ):
-    with torch.autocast("cuda", enabled=False):
+    with autocast_disabled():
         # extract necessary features
         atom_mask = true_coords_resolved_mask
 
@@ -338,7 +338,7 @@ def get_target_pae(
     true_coords_resolved_mask,
     multiplicity=1,
 ):
-    with torch.autocast("cuda", enabled=False):
+    with autocast_disabled():
         # Retrieve frames and resolved masks
         frames_idx_original = feats["frames_idx"]
         mask_frame_true = feats["frame_resolved_mask"]
@@ -505,7 +505,7 @@ def get_target_pde(
     true_coords_resolved_mask,
     multiplicity=1,
 ):
-    with torch.autocast("cuda", enabled=False):
+    with autocast_disabled():
         # extract necessary features
         token_to_rep_atom = feats["token_to_rep_atom"]
         token_to_rep_atom = token_to_rep_atom.repeat_interleave(multiplicity, 0).float()

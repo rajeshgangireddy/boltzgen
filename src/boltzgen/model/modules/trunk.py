@@ -5,6 +5,7 @@ from torch import Tensor, nn
 from torch.nn.functional import one_hot
 
 from boltzgen.data import const
+from boltzgen.utils.device import accelerator_type
 from boltzgen.model.layers.miniformer import (
     MiniformerNoSeqLayer,
     MiniformerNoSeqModule,
@@ -357,7 +358,7 @@ class TemplateModule(nn.Module):
         ).float()
 
         # Compute template features
-        with torch.autocast(device_type="cuda", enabled=False):
+        with torch.autocast(device_type=accelerator_type(), enabled=False):
             # Compute distogram
             cb_dists = torch.cdist(cb_coords, cb_coords)
             boundaries = torch.linspace(self.min_dist, self.max_dist, self.num_bins - 1)
@@ -507,7 +508,7 @@ class TokenDistanceModule(nn.Module):
         token_coords = feats["center_coords"]
 
         # Compute template features
-        with torch.autocast(device_type="cuda", enabled=False):
+        with torch.autocast(device_type=accelerator_type(), enabled=False):
             # Compute distogram
             dists = torch.cdist(token_coords, token_coords)
             boundaries = torch.linspace(self.min_dist, self.max_dist, self.num_bins - 1)

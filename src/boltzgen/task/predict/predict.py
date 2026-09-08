@@ -12,7 +12,7 @@ from typing import List, Optional, Union
 
 import torch
 from omegaconf import OmegaConf, listconfig
-from pytorch_lightning import LightningModule, Trainer
+from pytorch_lightning import LightningModule, Trainer, seed_everything
 
 from pytorch_lightning.strategies import DDPStrategy
 
@@ -23,6 +23,8 @@ from boltzgen.task.predict.writer import (
 )
 from boltzgen.task.task import Task
 from boltzgen.utils.pipeline_progress_bar import PipelineProgressBar
+from boltzgen.utils.timing import Timer, flush_rollup
+from boltzgen.utils.device import resolve_trainer_kwargs, xpu_precision_plugin
 from boltzgen.model.models.boltz import Boltz
 
 
@@ -51,6 +53,7 @@ class Predict(Task):
         compile_pairformer: bool = False,
         compile_structure: bool = False,
         checkpoint_diffusion_conditioning: bool = False,
+        seed: Optional[int] = None,
     ) -> None:
         """Initialize the task.
 
@@ -93,6 +96,7 @@ class Predict(Task):
         self.compile_pairformer = compile_pairformer
         self.compile_structure = compile_structure
         self.checkpoint_diffusion_conditioning = checkpoint_diffusion_conditioning
+        self.seed = seed
 
     def run(self, config: OmegaConf = None, run_prediction=True) -> None:  # noqa: ARG002
         # Silence warnings and pytorch lightning tips
@@ -105,6 +109,10 @@ class Predict(Task):
 
         # Set no grad
         torch.set_grad_enabled(False)
+
+        if self.seed is not None:
+            seed_everything(self.seed, workers=True)
+            self.data.predict_set.seed = self.seed
 
         # Experiment with this during training (high or medium)
         if self.matmul_precision is not None:
@@ -133,16 +141,17 @@ class Predict(Task):
             self.trainer["num_nodes"] = int(os.environ.get("SLURM_NNODES", 1))
 
         # Load model
-        self.model_module: LightningModule = Boltz.load_from_checkpoint(
-            self.checkpoint,
-            strict=True,
-            use_ema=self.use_ema,
-            checkpoint_diffusion_conditioning=self.checkpoint_diffusion_conditioning,
-            map_location="cpu",
-            weights_only=False,
-            predict_args=self.predict_args,
-            **self.override,
-        )
+        with Timer("predict.load_checkpoint", gpu=False, checkpoint=self.checkpoint):
+            self.model_module: LightningModule = Boltz.load_from_checkpoint(
+                self.checkpoint,
+                strict=True,
+                use_ema=self.use_ema,
+                checkpoint_diffusion_conditioning=self.checkpoint_diffusion_conditioning,
+                map_location="cpu",
+                weights_only=False,
+                predict_args=self.predict_args,
+                **self.override,
+            )
         self.model_module.eval()
 
         if self.compile_pairformer:
@@ -161,14 +170,18 @@ class Predict(Task):
             )
 
         # Set up trainer
-        strategy = "auto"
         num_devices = (
             len(devices)
             if isinstance(devices, (list, listconfig.ListConfig))
             else devices
         )
-        if num_devices > 1:
-            strategy = DDPStrategy()
+        accelerator, strategy = resolve_trainer_kwargs(devices)
+        self.trainer["accelerator"] = accelerator
+        precision_plugin = xpu_precision_plugin(self.trainer.get("precision"))
+        if precision_plugin is not None:
+            self.trainer.pop("precision")
+            self.trainer["plugins"] = precision_plugin
+        if isinstance(strategy, DDPStrategy):
             if num_devices > len(self.data.predict_set):
                 devices = max(1, len(self.data.predict_set))
                 msg = f"Fewer designs than devices. Setting devices to {devices}."
@@ -187,8 +200,53 @@ class Predict(Task):
             **self.trainer,
         )
         if run_prediction:
-            # Run training
-            self.lightning_trainer.predict(
-                self.model_module, datamodule=self.data, return_predictions=False
-            )
+            # Optional op-level profiling, gated by env var (zero cost otherwise).
+            # Not all backends support Kineto tracing (e.g. this XPU build
+            # raises PTI_ERROR_NOT_IMPLEMENTED); use manual `Timer` instrumentation
+            # for those cases instead.
+            profile_trace = os.environ.get("BOLTZGEN_PROFILE_TRACE")
+            if profile_trace:
+                from torch.profiler import ProfilerActivity, profile
+
+                activities = [ProfilerActivity.CPU]
+                if torch.cuda.is_available():
+                    activities.append(ProfilerActivity.CUDA)
+                if getattr(torch, "xpu", None) is not None and torch.xpu.is_available():
+                    activities.append(ProfilerActivity.XPU)
+                with profile(activities=activities, record_shapes=False) as prof:
+                    with Timer(
+                        "predict.trainer_predict",
+                        num_samples=len(self.data.predict_set),
+                        devices=devices,
+                    ):
+                        self.lightning_trainer.predict(
+                            self.model_module,
+                            datamodule=self.data,
+                            return_predictions=False,
+                        )
+                sort_key = (
+                    "self_xpu_time_total"
+                    if ProfilerActivity.XPU in activities
+                    else (
+                        "self_cuda_time_total"
+                        if ProfilerActivity.CUDA in activities
+                        else "self_cpu_time_total"
+                    )
+                )
+                table = prof.key_averages().table(sort_by=sort_key, row_limit=50)
+                print(table)
+                with open(profile_trace + ".table.txt", "w") as f:
+                    f.write(table)
+                prof.export_chrome_trace(profile_trace)
+            else:
+                # Run training
+                with Timer(
+                    "predict.trainer_predict",
+                    num_samples=len(self.data.predict_set),
+                    devices=devices,
+                ):
+                    self.lightning_trainer.predict(
+                        self.model_module, datamodule=self.data, return_predictions=False
+                    )
+            flush_rollup()
             del self.model_module

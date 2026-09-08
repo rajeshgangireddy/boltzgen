@@ -54,6 +54,19 @@ from boltzgen.data.mol import load_canonicals
 from boltzgen.data.parse.schema import YamlDesignParser
 from boltzgen.data.write.mmcif import to_mmcif
 from boltzgen.task.task import Task
+from boltzgen.utils.timing import (
+    Timer,
+    record_timing,
+    set_timing_file,
+    flush_rollup,
+    print_timing_summary,
+    DEFAULT_TIMING_FILENAME,
+)
+from boltzgen.utils.device import (
+    accelerator_type,
+    device_capability_safe,
+    device_count,
+)
 from importlib.metadata import PackageNotFoundError, version as pkg_version
 
 ### Paths and constants ####
@@ -178,6 +191,12 @@ def add_configure_arguments(
         default=1,
     )
     p.add_argument(
+        "--seed",
+        type=int,
+        help="Optional seed for reproducible prediction and data-feature sampling.",
+        default=None,
+    )
+    p.add_argument(
         "--config_dir",
         type=Path,
         help=f"Path to the directory of default config files. Default: %(default)s",
@@ -189,6 +208,15 @@ def add_configure_arguments(
         "If 'auto', will use kernels if the device capability is >= 8.",
         choices=["auto", "true", "false"],
         default="auto",
+    )
+    p.add_argument(
+        "--timing_file",
+        type=str,
+        help="Filename (relative to --output, or an absolute path) for the JSONL file "
+        "that per-phase timing measurements are appended to. Change this between runs "
+        "to keep timings from different experiments (e.g. different hardware backends) "
+        "separate while using the same tracking mechanism. Default: %(default)s",
+        default=DEFAULT_TIMING_FILENAME,
     )
     p.add_argument(
         "--moldir",
@@ -758,6 +786,15 @@ def execute_command(args: argparse.Namespace) -> None:
     if not config_dir.exists() or not config_dir.is_dir():
         raise FileNotFoundError(f"Configuration directory not found: {config_dir}")
 
+    # Resolve and propagate the timing file so every step (including any
+    # subprocesses/DDP ranks it spawns) appends to the same experiment log.
+    timing_filename = getattr(args, "timing_file", None) or DEFAULT_TIMING_FILENAME
+    timing_path = Path(timing_filename)
+    if not timing_path.is_absolute():
+        timing_path = config_dir / timing_path
+    set_timing_file(timing_path)
+    print(f"Timing measurements will be appended to: {timing_path}")
+
     # Look for steps.yaml file
     steps_yaml_path = config_dir / "steps.yaml"
     if not steps_yaml_path.exists():
@@ -824,11 +861,25 @@ def execute_command(args: argparse.Namespace) -> None:
 
         elapsed = time.time() - start
         print(f"✓ Step {step_name} completed successfully in {elapsed:.1f}s")
+        record_timing(
+            "pipeline.step",
+            elapsed,
+            step_name=step_name,
+            step_index=index,
+            total_steps=total_steps,
+            subprocess=args.subprocess,
+        )
 
     if "BOLTZGEN_PIPELINE_PROGRESS" in os.environ:
         del os.environ["BOLTZGEN_PIPELINE_PROGRESS"]
     if "BOLTZGEN_PIPELINE_STEP" in os.environ:
         del os.environ["BOLTZGEN_PIPELINE_STEP"]
+
+    # Persist this process's own roll-up (the per-step wall times recorded
+    # above) without printing it in isolation, then print the complete,
+    # merged overview across every pipeline step/subprocess that ran.
+    flush_rollup(timing_path.with_suffix(".csv"), print_summary=False)
+    print_timing_summary(timing_path.with_suffix(".csv"))
 
 
 #### Pipeline implementation ####
@@ -917,13 +968,20 @@ class BinderDesignPipeline:
                 f"Invalid protocol: {protocol}. Valid protocols: {list(protocol_configs.keys())}"
             )
 
-        # Handle use_kernels argument
-        device_capability = torch.cuda.get_device_capability()
+        # Handle use_kernels argument. cuEquivariance kernels are CUDA-only,
+        # so device capability only matters (and is only queryable) on CUDA.
+        device_capability = device_capability_safe()
         use_kernels = None
         if args.use_kernels == "auto":
-            use_kernels = device_capability[0] >= 8
+            use_kernels = device_capability is not None and device_capability[0] >= 8
         elif args.use_kernels == "true":
             use_kernels = True
+            if device_capability is None:
+                print(
+                    "WARNING: --use_kernels true requested, but cuEquivariance "
+                    f"kernels require CUDA (detected accelerator: {accelerator_type()}). "
+                    "This will fail unless the package happens to be importable."
+                )
         elif args.use_kernels == "false":
             use_kernels = False
         else:
@@ -937,10 +995,17 @@ class BinderDesignPipeline:
         config_args_by_step = parse_config_args(
             protocol_config, args.config, step_names
         )
+        if args.seed is not None:
+            for step_name in (
+                "design",
+                "inverse_folding",
+                "folding",
+                "design_folding",
+                "affinity",
+            ):
+                config_args_by_step[step_name].append(f"seed={args.seed}")
 
-        devices = (
-            args.devices if args.devices is not None else torch.cuda.device_count()
-        )
+        devices = args.devices if args.devices is not None else device_count()
         print(f"Using {devices} devices")
 
         self.steps = []

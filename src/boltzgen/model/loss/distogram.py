@@ -2,6 +2,7 @@ from typing import Dict, Tuple
 
 import torch
 from torch import Tensor
+from boltzgen.utils.device import autocast_disabled
 
 
 def distogram_loss(
@@ -26,7 +27,7 @@ def distogram_loss(
         Per example loss.
 
     """
-    with torch.autocast("cuda", enabled=False):
+    with autocast_disabled():
         # Get predicted distograms
         pred = output["pdistogram"].float()  # (B, L, L, num_distograms, disto_bins)
         D = pred.shape[3] # num_distograms  # noqa: N806
@@ -105,5 +106,4 @@ def distogram_loss(
             global_loss = torch.mean(batch_loss)
 
         return global_loss, batch_loss
-
 

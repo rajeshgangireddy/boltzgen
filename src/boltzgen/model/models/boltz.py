@@ -49,6 +49,8 @@ from boltzgen.model.modules.inverse_fold import (
     InverseFoldingEncoder,
     InverseFoldingDecoder,
 )
+from boltzgen.utils.timing import Timer
+from boltzgen.utils.device import accelerator_type, autocast_disabled, empty_cache
 
 import torch
 
@@ -522,40 +524,49 @@ class Boltz(LightningModule):
             (self.training and self.structure_prediction_training)
         ):
             if self.inverse_fold:
-                if self.enable_if_input_embedder:
-                    s_inputs = self.input_embedder(feats)
-                    feats["s_inputs"] = s_inputs
-                edge_idx, valid_mask, s, z = self.inverse_folding_encoder(feats)
-                # Remove s_inputs from feats dictionary
-                feats.pop("s_inputs", None)
+                with Timer("forward.inverse_folding_encoder", level="detail"):
+                    if self.enable_if_input_embedder:
+                        s_inputs = self.input_embedder(feats)
+                        feats["s_inputs"] = s_inputs
+                    edge_idx, valid_mask, s, z = self.inverse_folding_encoder(feats)
+                    # Remove s_inputs from feats dictionary
+                    feats.pop("s_inputs", None)
             else:
-                s_inputs = self.input_embedder(feats)
+                with Timer("forward.input_embedding_init", level="detail"):
+                    s_inputs = self.input_embedder(feats)
 
-                # Initialize the sequence embeddings
-                s_init = self.s_init(s_inputs)
+                    # Initialize the sequence embeddings
+                    s_init = self.s_init(s_inputs)
 
-                # Initialize pairwise embeddings
-                z_init = (
-                    self.z_init_1(s_inputs)[:, :, None]
-                    + self.z_init_2(s_inputs)[:, None, :]
-                )
-                relative_position_encoding = self.rel_pos(feats)
-                z_init = z_init + relative_position_encoding
-                z_init = z_init + self.token_bonds(feats["token_bonds"].float())
-                if self.bond_type_feature:
-                    z_init = z_init + self.token_bonds_type(feats["type_bonds"].long())
-                z_init = z_init + self.contact_conditioning(feats)
+                    # Initialize pairwise embeddings
+                    z_init = (
+                        self.z_init_1(s_inputs)[:, :, None]
+                        + self.z_init_2(s_inputs)[:, None, :]
+                    )
+                    relative_position_encoding = self.rel_pos(feats)
+                    z_init = z_init + relative_position_encoding
+                    z_init = z_init + self.token_bonds(feats["token_bonds"].float())
+                    if self.bond_type_feature:
+                        z_init = z_init + self.token_bonds_type(
+                            feats["type_bonds"].long()
+                        )
+                    z_init = z_init + self.contact_conditioning(feats)
 
-                # Perform rounds of the pairwise stack
-                s = torch.zeros_like(s_init)
-                z = torch.zeros_like(z_init)
+                    # Perform rounds of the pairwise stack
+                    s = torch.zeros_like(s_init)
+                    z = torch.zeros_like(z_init)
 
-                # Compute pairwise mask
-                mask = feats["token_pad_mask"].float()
-                pair_mask = mask[:, :, None] * mask[:, None, :]
+                    # Compute pairwise mask
+                    mask = feats["token_pad_mask"].float()
+                    pair_mask = mask[:, :, None] * mask[:, None, :]
 
             if not self.inverse_fold:
-                for i in range(recycling_steps + 1):
+                with Timer(
+                    "predict.trunk",
+                    recycling_steps=recycling_steps,
+                    use_kernels=self.use_kernels,
+                ):
+                  for i in range(recycling_steps + 1):
                     with torch.set_grad_enabled(
                         (
                             self.training
@@ -567,7 +578,7 @@ class Boltz(LightningModule):
                         if (
                             self.training
                             and (i == recycling_steps)
-                            and torch.is_autocast_enabled()
+                            and torch.is_autocast_enabled(accelerator_type())
                         ):
                             torch.clear_autocast_cache()
 
@@ -577,64 +588,70 @@ class Boltz(LightningModule):
 
                         # Compute pairwise stack
                         if self.use_token_distances:
-                            z = z + self.token_distance_module(
-                                z, feats, pair_mask, relative_position_encoding
-                            )
+                            with Timer("trunk.token_distance_module", level="detail"):
+                                z = z + self.token_distance_module(
+                                    z, feats, pair_mask, relative_position_encoding
+                                )
 
                         # Compute pairwise stack
                         if self.use_templates:
-                            z = z + self.template_module(
-                                z, feats, pair_mask, use_kernels=self.use_kernels
-                            )
+                            with Timer("trunk.template_module", level="detail"):
+                                z = z + self.template_module(
+                                    z, feats, pair_mask, use_kernels=self.use_kernels
+                                )
 
                         if not self.inverse_fold:
-                            z = z + self.msa_module(
-                                z, s_inputs, feats, use_kernels=self.use_kernels
+                            with Timer("trunk.msa_module", level="detail"):
+                                z = z + self.msa_module(
+                                    z, s_inputs, feats, use_kernels=self.use_kernels
+                                )
+
+                        with Timer("trunk.pairformer_module", level="detail"):
+                            s, z = self.pairformer_module(
+                                s,
+                                z,
+                                mask=mask,
+                                pair_mask=pair_mask,
+                                use_kernels=self.use_kernels,
                             )
 
-                        s, z = self.pairformer_module(
+            if not self.inverse_fold:
+                with Timer("forward.distogram_module", level="detail"):
+                    pdistogram = self.distogram_module(z)
+                    dict_out["pdistogram"] = pdistogram.float()
+
+            if not self.inverse_fold:
+                with Timer("forward.diffusion_conditioning", level="detail"):
+                    if self.checkpoint_diffusion_conditioning:
+                        # TODO decide whether this should be with bf16 or not
+                        (
+                            q,
+                            c,
+                            to_keys,
+                            atom_enc_bias,
+                            atom_dec_bias,
+                            token_trans_bias,
+                        ) = torch.utils.checkpoint.checkpoint(
+                            self.diffusion_conditioning,
                             s,
                             z,
-                            mask=mask,
-                            pair_mask=pair_mask,
-                            use_kernels=self.use_kernels,
+                            relative_position_encoding,
+                            feats,
                         )
-
-            if not self.inverse_fold:
-                pdistogram = self.distogram_module(z)
-                dict_out["pdistogram"] = pdistogram.float()
-
-            if not self.inverse_fold:
-                if self.checkpoint_diffusion_conditioning:
-                    # TODO decide whether this should be with bf16 or not
-                    (
-                        q,
-                        c,
-                        to_keys,
-                        atom_enc_bias,
-                        atom_dec_bias,
-                        token_trans_bias,
-                    ) = torch.utils.checkpoint.checkpoint(
-                        self.diffusion_conditioning,
-                        s,
-                        z,
-                        relative_position_encoding,
-                        feats,
-                    )
-                else:
-                    (
-                        q,
-                        c,
-                        to_keys,
-                        atom_enc_bias,
-                        atom_dec_bias,
-                        token_trans_bias,
-                    ) = self.diffusion_conditioning(
-                        s_trunk=s,
-                        z_trunk=z,
-                        relative_position_encoding=relative_position_encoding,
-                        feats=feats,
-                    )
+                    else:
+                        (
+                            q,
+                            c,
+                            to_keys,
+                            atom_enc_bias,
+                            atom_dec_bias,
+                            token_trans_bias,
+                        ) = self.diffusion_conditioning(
+                            s_trunk=s,
+                            z_trunk=z,
+                            relative_position_encoding=relative_position_encoding,
+                            feats=feats,
+                        )
                 diffusion_conditioning = {
                     "q": q,
                     "c": c,
@@ -655,7 +672,11 @@ class Boltz(LightningModule):
             ):
                 if self.inference_logging:
                     print("\nRunning Structure Module.\n")
-                with torch.autocast("cuda", enabled=False):
+                with Timer(
+                    "predict.diffusion_sampling",
+                    num_sampling_steps=num_sampling_steps,
+                    diffusion_samples=diffusion_samples,
+                ), autocast_disabled():
                     if not self.inverse_fold:
                         struct_out = self.structure_module.sample(
                             s_trunk=s.float(),
@@ -711,7 +732,7 @@ class Boltz(LightningModule):
                 feats["coords"] = atom_coords  # (multiplicity, L, 3)
                 assert len(feats["coords"].shape) == 3
 
-                with torch.autocast("cuda", enabled=False):
+                with autocast_disabled():
                     if not self.inverse_fold:
                         struct_out = self.structure_module(
                             s_trunk=s.float(),
@@ -735,19 +756,26 @@ class Boltz(LightningModule):
                 assert len(feats["coords"].shape) == 3
 
         if self.confidence_prediction:
-            dict_out.update(
-                self.confidence_module(
-                    s_inputs=s_inputs.detach(),
-                    s=s.detach(),
-                    z=z.detach(),
-                    x_pred=(dict_out["sample_atom_coords"].detach()),
-                    feats=feats,
-                    pred_distogram_logits=(dict_out["pdistogram"][:, :, :, 0].detach()),
-                    multiplicity=diffusion_samples,
-                    run_sequentially=run_confidence_sequentially,
-                    use_kernels=self.use_kernels,
+            with Timer(
+                "predict.confidence",
+                multiplicity=diffusion_samples,
+                use_kernels=self.use_kernels,
+            ):
+                dict_out.update(
+                    self.confidence_module(
+                        s_inputs=s_inputs.detach(),
+                        s=s.detach(),
+                        z=z.detach(),
+                        x_pred=(dict_out["sample_atom_coords"].detach()),
+                        feats=feats,
+                        pred_distogram_logits=(
+                            dict_out["pdistogram"][:, :, :, 0].detach()
+                        ),
+                        multiplicity=diffusion_samples,
+                        run_sequentially=run_confidence_sequentially,
+                        use_kernels=self.use_kernels,
+                    )
                 )
-            )
 
         if self.affinity_prediction:
             pad_token_mask = feats["token_pad_mask"][0]
@@ -769,7 +797,11 @@ class Boltz(LightningModule):
             ]
             s_inputs = self.input_embedder(feats, affinity=True)
 
-            with torch.autocast("cuda", enabled=False):
+            with Timer(
+                "predict.affinity",
+                ensemble=self.affinity_ensemble,
+                use_kernels=self.use_kernels,
+            ), autocast_disabled():
                 if self.affinity_ensemble:
                     dict_out_affinity1 = self.affinity_module1(
                         s_inputs=s_inputs.detach(),
@@ -1102,18 +1134,14 @@ class Boltz(LightningModule):
             if p.requires_grad and p.grad is not None
         ]
         if len(parameters) == 0:
-            return torch.tensor(
-                0.0, device="cuda" if torch.cuda.is_available() else "cpu"
-            )
+            return torch.tensor(0.0, device=accelerator_type())
         norm = torch.stack(parameters).sum().sqrt()
         return norm
 
     def parameter_norm(self, module):
         parameters = [p.norm(p=2) ** 2 for p in module.parameters() if p.requires_grad]
         if len(parameters) == 0:
-            return torch.tensor(
-                0.0, device="cuda" if torch.cuda.is_available() else "cpu"
-            )
+            return torch.tensor(0.0, device=accelerator_type())
         norm = torch.stack(parameters).sum().sqrt()
         return norm
 
@@ -1165,7 +1193,7 @@ class Boltz(LightningModule):
                         "res_type =",
                         batch["res_type"].shape,
                     )
-                    torch.cuda.empty_cache()
+                    empty_cache()
                     return
                 raise e
         else:
@@ -1184,7 +1212,7 @@ class Boltz(LightningModule):
                 if "out of memory" in str(e):
                     msg = f"| WARNING: ran out of memory, skipping batch, {idx_dataset}"
                     print(msg)
-                    torch.cuda.empty_cache()
+                    empty_cache()
                     return
                 raise e
 
@@ -1277,21 +1305,31 @@ class Boltz(LightningModule):
         noise_scale = getattr(self, "current_noise_scale", None)
 
         try:
-            feat_masked = self.masker(batch)
-            out = self(
-                feat_masked,
+            with Timer("predict.masker", gpu=False, level="detail"):
+                feat_masked = self.masker(batch)
+            with Timer(
+                "predict.forward_total",
+                batch_idx=batch_idx,
+                inverse_fold=self.inverse_fold,
                 recycling_steps=self.predict_args["recycling_steps"],
-                num_sampling_steps=self.predict_args["sampling_steps"],
+                sampling_steps=self.predict_args["sampling_steps"],
                 diffusion_samples=self.predict_args["diffusion_samples"],
-                run_confidence_sequentially=True,
-                step_scale=step_scale,
-                noise_scale=noise_scale,
-                return_z_feats=(
-                    self.predict_args["return_z_feats"]
-                    if "return_z_feats" in self.predict_args
-                    else False
-                ),
-            )
+                use_kernels=self.use_kernels,
+            ):
+                out = self(
+                    feat_masked,
+                    recycling_steps=self.predict_args["recycling_steps"],
+                    num_sampling_steps=self.predict_args["sampling_steps"],
+                    diffusion_samples=self.predict_args["diffusion_samples"],
+                    run_confidence_sequentially=True,
+                    step_scale=step_scale,
+                    noise_scale=noise_scale,
+                    return_z_feats=(
+                        self.predict_args["return_z_feats"]
+                        if "return_z_feats" in self.predict_args
+                        else False
+                    ),
+                )
             pred_dict = {"exception": False}
             pred_dict.update(feat_masked)
 
@@ -1371,7 +1409,7 @@ class Boltz(LightningModule):
         except RuntimeError as e:  # catch out of memory exceptions
             if "out of memory" in str(e):
                 print("| WARNING: ran out of memory, skipping batch")
-                torch.cuda.empty_cache()
+                empty_cache()
                 return {"exception": True}
             else:
                 raise e

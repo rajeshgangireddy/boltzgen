@@ -28,6 +28,7 @@ from boltzgen.task.filter.seqplot_utils import (
     plot_seq_liabilities,
 )
 from boltzgen.task.task import Task
+from boltzgen.utils.timing import Timer, flush_rollup
 
 
 class Filter(Task):
@@ -310,37 +311,48 @@ class Filter(Task):
         np.random.seed(self.random_state)
 
     def run(self, config=None, jupyter_nb=False):
-        self.load_dataframe()
-        self.reset_outdir()
-        self.filter_df()
-        self.absolute_metrics()
-        self.sort_df()
-        self.optimize_diversity()
-        self.write_outdir()
+        with Timer("filter.total", gpu=False):
+            with Timer("filter.load_dataframe", gpu=False, level="detail"):
+                self.load_dataframe()
+            with Timer("filter.reset_outdir", gpu=False, level="detail"):
+                self.reset_outdir()
+            with Timer("filter.filter_df", gpu=False, level="detail"):
+                self.filter_df()
+            with Timer("filter.absolute_metrics", gpu=False, level="detail"):
+                self.absolute_metrics()
+            with Timer("filter.sort_df", gpu=False, level="detail"):
+                self.sort_df()
+            with Timer("filter.optimize_diversity", gpu=False, level="detail"):
+                self.optimize_diversity()
+            with Timer("filter.write_outdir", gpu=False, level="detail"):
+                self.write_outdir()
 
-        # Visualizations
-        print(
-            "\nWriting design files is done. Now making plots for a final summary .pdf file with statistics."
-        )
-        (
-            hist_metrics,
-            extra_pairs,
-            row_headers,
-            rows,
-            metric_rows,
-            intro_text,
-            csv_expl_rows,
-        ) = self.prepare_visualization()
-        self.make_visualization(
-            hist_metrics,
-            extra_pairs,
-            row_headers,
-            rows,
-            metric_rows,
-            intro_text,
-            csv_expl_rows,
-            jupyter_nb=jupyter_nb,
-        )
+            # Visualizations
+            print(
+                "\nWriting design files is done. Now making plots for a final summary .pdf file with statistics."
+            )
+            with Timer("filter.prepare_visualization", gpu=False, level="detail"):
+                (
+                    hist_metrics,
+                    extra_pairs,
+                    row_headers,
+                    rows,
+                    metric_rows,
+                    intro_text,
+                    csv_expl_rows,
+                ) = self.prepare_visualization()
+            with Timer("filter.make_visualization", gpu=False):
+                self.make_visualization(
+                    hist_metrics,
+                    extra_pairs,
+                    row_headers,
+                    rows,
+                    metric_rows,
+                    intro_text,
+                    csv_expl_rows,
+                    jupyter_nb=jupyter_nb,
+                )
+        flush_rollup()
 
     def reset_outdir(self):
         if self.outdir.exists():
