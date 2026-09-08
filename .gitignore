@@ -206,6 +206,7 @@ data/PepPC/
 data/PepPC*
 *.err
 *.csv
+timings.jsonl
 data/test_set
 visualization_data_designed_only
 visualization_results_designed_only

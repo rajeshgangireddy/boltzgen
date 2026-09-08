@@ -27,6 +27,7 @@ from boltzgen.data.write.mmcif import to_mmcif
 from boltzgen.data.write.pdb import to_pdb
 from boltzgen.model.loss.diffusion import weighted_rigid_align
 from boltzgen.model.modules.masker import BoltzMasker
+from boltzgen.utils.device import autocast_disabled
 
 
 def _existing_output_alias(
@@ -541,7 +542,7 @@ class DesignWriter(BasePredictionWriter):
                     traj = trajs[n]
                     aligned = [traj[0]]
                     for frame in traj[1:]:
-                        with torch.autocast("cuda", enabled=False):
+                        with autocast_disabled():
                             aligned.append(
                                 weighted_rigid_align(
                                     frame.float().unsqueeze(0),
@@ -589,7 +590,7 @@ class DesignWriter(BasePredictionWriter):
                     traj = trajs[n]
                     aligned = [traj[0]]
                     for frame in traj[1:]:
-                        with torch.autocast("cuda", enabled=False):
+                        with autocast_disabled():
                             aligned.append(
                                 weighted_rigid_align(
                                     frame.float().unsqueeze(0),

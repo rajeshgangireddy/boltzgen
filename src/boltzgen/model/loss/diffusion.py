@@ -5,6 +5,8 @@ import torch
 import torch.nn.functional as F
 from einops import einsum, rearrange
 
+from boltzgen.utils.timing import Timer
+
 
 def weighted_rigid_centering(
     true_coords,  # Float['b n 3'],       #  true coordinates
@@ -80,9 +82,10 @@ def weighted_rigid_align(
     original_dtype = cov_matrix.dtype
     cov_matrix_32 = cov_matrix.to(dtype=torch.float32)
 
-    U, S, V = torch.linalg.svd(
-        cov_matrix_32, driver="gesvd" if cov_matrix_32.is_cuda else None
-    )
+    with Timer("diffusion.rigid_align_svd", level="detail"):
+        U, S, V = torch.linalg.svd(
+            cov_matrix_32, driver="gesvd" if cov_matrix_32.is_cuda else None
+        )
     V = V.mH
 
     # Catch ambiguous rotation by checking the magnitude of singular values

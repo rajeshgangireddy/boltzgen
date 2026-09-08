@@ -14,6 +14,7 @@ from pytorch_lightning.strategies import DDPStrategy
 
 from boltzgen.task.task import Task
 from boltzgen.task.train.data import DataConfig, TrainingDataModule
+from boltzgen.utils.device import resolve_trainer_kwargs, xpu_precision_plugin
 
 
 class Training(Task):
@@ -200,14 +201,18 @@ class Training(Task):
                 pass
 
         # Set up trainer
-        strategy = "auto"
-        if (isinstance(devices, int) and devices > 1) or (
-            isinstance(devices, (list, listconfig.ListConfig)) and len(devices) > 1
-        ):
-            strategy = DDPStrategy(
-                find_unused_parameters=self.find_unused_parameters,
-                timeout=datetime.timedelta(seconds=self.ddp_timeout_seconds),
-            )
+        accelerator, strategy = resolve_trainer_kwargs(
+            devices,
+            ddp_kwargs={
+                "find_unused_parameters": self.find_unused_parameters,
+                "timeout": datetime.timedelta(seconds=self.ddp_timeout_seconds),
+            },
+        )
+        self.trainer["accelerator"] = accelerator
+        precision_plugin = xpu_precision_plugin(self.trainer.get("precision"))
+        if precision_plugin is not None:
+            self.trainer.pop("precision")
+            self.trainer["plugins"] = precision_plugin
 
         trainer = pl.Trainer(
             default_root_dir=str(dirpath),

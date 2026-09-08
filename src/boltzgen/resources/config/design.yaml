@@ -35,7 +35,7 @@ writer:
   write_native: false
 
 trainer:
-  accelerator: gpu
+  accelerator: auto
   devices: 1
   precision: bf16-mixed
 

@@ -1,7 +1,7 @@
 _target_: boltzgen.task.train.train.Training
 
 trainer:
-  accelerator: cuda
+  accelerator: auto
   devices: 4
   precision: 32
   gradient_clip_val: 10.0

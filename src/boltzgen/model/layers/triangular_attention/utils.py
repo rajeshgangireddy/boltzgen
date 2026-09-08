@@ -15,6 +15,7 @@ from functools import partial
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import torch
+from boltzgen.utils.device import accelerator_type
 
 
 def add(m1, m2, inplace):
@@ -36,8 +37,9 @@ def permute_final_dims(tensor: torch.Tensor, inds: List[int]):
 
 def is_fp16_enabled():
     # Autocast world
-    fp16_enabled = torch.get_autocast_gpu_dtype() == torch.float16
-    fp16_enabled = fp16_enabled and torch.is_autocast_enabled()
+    device_type = accelerator_type()
+    fp16_enabled = torch.get_autocast_dtype(device_type) == torch.float16
+    fp16_enabled = fp16_enabled and torch.is_autocast_enabled(device_type)
 
     return fp16_enabled
 
