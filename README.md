@@ -1,5 +1,12 @@
 > This is a fork of [BoltzGen](https://github.com/HannesStark/boltzgen) that adds support for Intel GPUs (XPU), in addition to the original NVIDIA CUDA support.
 
+**⚡ Intel XPU support status:**
+- [x] Inference (CPU / CUDA / Intel XPU)
+- [x] Docker images (CPU / CUDA / Intel XPU)
+- [x] Packaging via `uv` extras (`cpu` / `cuda` / `xpu`)
+- [ ] Training on Intel XPU (untested)
+- [ ] Multi-GPU support on Intel XPU
+
 <div align="center">
   <div>&nbsp;</div>
   <img src="assets/boltzgen.png" alt="BoltzGen logo" width="60%">
