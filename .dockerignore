@@ -1,0 +1,44 @@
+# Local dev virtualenvs (multi-GB, never needed in the build context)
+.venv/
+.xpu/
+venv/
+env/
+
+# Git metadata
+.git/
+.gitignore
+
+# Local-only experiment/tracking docs (not part of the shipped image)
+INTEL_GPU_SUPPORT.md
+XPU_PERFORMANCE_CHECKLIST.md
+timings.jsonl
+timings.csv
+
+# Caches / build artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+build/
+dist/
+
+# Editor / IDE
+.vscode/
+.idea/
+
+# Large local data / output dirs
+data/
+workdir*/
+workbench/
+outputs/
+results/
+cache/
+samples/
+notebooks/
+*.ckpt
+*.pt
+
+# Docs not needed inside the image
+docs/
