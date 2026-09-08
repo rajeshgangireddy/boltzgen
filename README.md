@@ -71,18 +71,25 @@ pip install -e ".[xpu]"   # or ".[cuda]" / ".[cpu]"
     Click for optional Docker instructions if you prefer Docker
   </summary>
 
-> ⚡ **XPU:** The current `Dockerfile` is NVIDIA/CUDA-only. An Intel XPU Docker image is planned/coming soon - for now, use the `uv`/`pip` install path above on Intel GPU hosts.
-
-To build and run the docker image:
+The single `Dockerfile` builds CPU, NVIDIA CUDA, and ⚡ Intel XPU images, selected via `--build-arg BACKEND=...` (mirrors the `cpu`/`cuda`/`xpu` extras above). All three are validated end-to-end (CPU, an RTX 3090, and an Intel Arc Pro B60).
 
 ```bash
-# Build
-docker build -t boltzgen .
+# Build (BACKEND is one of: cpu, cuda, xpu)
+docker build --build-arg BACKEND=cuda -t boltzgen:cuda .
 
 # Run an example
 mkdir -p workdir  # output
 mkdir -p cache    # where models will be downloaded to
-docker run --rm --gpus all -v "$(realpath workdir)":/workdir -v "$(realpath cache)":/cache -v "$(realpath example)":/example boltzgen \
+
+# CUDA
+docker run --rm --gpus all -v "$(realpath workdir)":/workdir -v "$(realpath cache)":/cache -v "$(realpath example)":/example boltzgen:cuda \
+    boltzgen run /example/vanilla_protein/1g13prot.yaml --output /workdir/test \
+ 	--protocol protein-anything \
+  	--num_designs 2
+
+# ⚡ XPU: pass through the render device; the render-group GID varies per host
+docker run --rm --device /dev/dri --group-add "$(stat -c '%g' /dev/dri/renderD128)" \
+    -v "$(realpath workdir)":/workdir -v "$(realpath cache)":/cache -v "$(realpath example)":/example boltzgen:xpu \
     boltzgen run /example/vanilla_protein/1g13prot.yaml --output /workdir/test \
  	--protocol protein-anything \
   	--num_designs 2
@@ -91,7 +98,7 @@ docker run --rm --gpus all -v "$(realpath workdir)":/workdir -v "$(realpath cach
 In the example above, the model weights are downloaded the first time the image is run. To bake the weights into the image at build time, run:
 
 ```bash
-docker build -t boltzgen:weights --build-arg DOWNLOAD_WEIGHTS=true .
+docker build --build-arg BACKEND=cuda --build-arg DOWNLOAD_WEIGHTS=true -t boltzgen:cuda-weights .
 ```
 </details>
 <br>
