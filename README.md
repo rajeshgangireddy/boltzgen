@@ -78,7 +78,7 @@ pip install -e ".[xpu]"   # or ".[cuda]" / ".[cpu]"
     Click for optional Docker instructions if you prefer Docker
   </summary>
 
-The single `Dockerfile` builds CPU, NVIDIA CUDA, and ⚡ Intel XPU images, selected via `--build-arg BACKEND=...` (mirrors the `cpu`/`cuda`/`xpu` extras above). All three are validated end-to-end (CPU, an RTX 3090, and an Intel Arc Pro B60).
+The single `Dockerfile` builds CPU, NVIDIA CUDA, and ⚡ Intel XPU images, selected via `--build-arg BACKEND=...` (mirrors the `cpu`/`cuda`/`xpu` extras above). All three are validated end-to-end (CPU, an RTX 3090, and an Intel Arc Pro B60). (The CUDA build/run commands are the same pattern as the original repo - only `--build-arg BACKEND=...` is new.)
 
 ```bash
 # Build (BACKEND is one of: cpu, cuda, xpu)
@@ -148,7 +148,7 @@ All command line args are explained in ["All Command Line Arguments"](#all-comma
 
 **How many designs to generate?** \
 More is better. The "minimum" depends on your target.  
-BoltzGen should be run on a GPU. On the right you can see the time required for each step in the pipeline for a single design on an A100 GPU.
+BoltzGen should be run on a GPU. On the right you can see the time required for each step in the pipeline for a single design on an A100 GPU. (Unchanged NVIDIA benchmark from the original repo; not yet re-benchmarked on XPU.)
 
 We suggest first running with e.g. `--num_design 50`, checking that everything behaves as desired, and then increasing `--num_design` to between 10,000 - 60,000.
 
@@ -645,6 +645,8 @@ folding_checkpoint: ./training_data/boltz2_fold.ckpt
 ```
 
 ### 3 – Train the models (example commands)
+
+> ⚡ **XPU:** `CUDA_VISIBLE_DEVICES` below is an NVIDIA-only env var, unchanged from the original repo; there's no tested XPU device-selection equivalent yet (see the training note above).
 
 Small model on 8 GPUs gradient accumulation 16 (recommended dev setup):
 
