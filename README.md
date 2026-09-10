@@ -24,6 +24,7 @@ uv sync --extra xpu    # Intel GPU
 uv sync --extra cuda   # NVIDIA GPU
 uv sync --extra cpu    # CPU only (no GPU; slow, for dev/testing)
 ```
+> ⚠️ Afterwards, run commands via the created `.venv` directly (e.g. `.venv/bin/boltzgen ...`, or `source .venv/bin/activate`) rather than `uv run ...`. Plain `uv run` re-resolves with no extra selected and silently reinstalls a different (CUDA) `torch` build, breaking XPU/CPU environments. If you do need `uv run`, always repeat the extra: `uv run --extra xpu ...`.
 
 <details>
   <summary style="font-size: 1.3em; font-weight: 600;">
