@@ -29,8 +29,15 @@ def test_fused_size_rejects_index_overflow_before_gpu_execution():
 
 
 @pytest.mark.parametrize("cached", [False, True])
+@pytest.mark.parametrize(
+    "runtime_kwargs,backend",
+    [
+        ({"require_cuda": True}, "cuda"),
+        ({"require_xpu": True}, "xpu"),
+    ],
+)
 def test_runtime_uses_cache_offline_and_provisions_only_when_needed(
-    monkeypatch, cached
+    monkeypatch, cached, runtime_kwargs, backend
 ):
     import subprocess
     from boltzgen.task.esmfold2 import runtime
@@ -44,11 +51,17 @@ def test_runtime_uses_cache_offline_and_provisions_only_when_needed(
         return subprocess.CompletedProcess(command, 0, "/isolated/python\n")
 
     monkeypatch.setattr(runtime.subprocess, "run", probe)
-    assert runtime.resolve_python(require_cuda=True) == "/isolated/python"
+    assert runtime.resolve_python(**runtime_kwargs) == "/isolated/python"
     assert "--offline" in calls[0]
     assert len(calls) == (2 if cached else 3)
     assert calls[-1][0] == "/isolated/python"
-    assert "torch.cuda.is_available()" in calls[-1][-1]
+    if backend == "cuda":
+        assert "torch.cuda.is_available()" in calls[-1][-1]
+        assert "--torch-backend" not in calls[0]
+    else:
+        assert "torch.xpu.is_available()" in calls[-1][-1]
+        assert "--torch-backend" in calls[0]
+        assert "xpu" in calls[0]
     if not cached:
         assert "--offline" not in calls[1]
 
@@ -228,6 +241,13 @@ def test_ranking_and_tiebreak_follow_esmfold2(tmp_path):
 
 @pytest.mark.parametrize("reuse", [False, True])
 @pytest.mark.parametrize(
+    "backend,runtime_kwargs",
+    [
+        ("cuda", {"require_cuda": True}),
+        ("xpu", {"require_xpu": True}),
+    ],
+)
+@pytest.mark.parametrize(
     "scoring_mode,target_chains,error",
     [
         ("binder", None, None),
@@ -238,7 +258,7 @@ def test_ranking_and_tiebreak_follow_esmfold2(tmp_path):
     ],
 )
 def test_configure_validates_settings_before_runtime_setup(
-    monkeypatch, tmp_path, reuse, scoring_mode, target_chains, error
+    monkeypatch, tmp_path, reuse, backend, runtime_kwargs, scoring_mode, target_chains, error
 ):
     from types import SimpleNamespace
     from omegaconf import OmegaConf
@@ -246,6 +266,7 @@ def test_configure_validates_settings_before_runtime_setup(
     from boltzgen.task.esmfold2 import runtime
     from boltzgen.task.esmfold2.score import ESMFold2Score
 
+    monkeypatch.setattr(cli, "accelerator_type", lambda: backend)
     config = OmegaConf.create(
         dict(
             python=None,
@@ -286,8 +307,140 @@ def test_configure_validates_settings_before_runtime_setup(
         assert not (args.output / "config/esmfold2_scoring.yaml").exists()
         return
     cli.configure_command(args)
-    assert calls == ([] if reuse else [(None, {"require_cuda": True})])
+    assert calls == ([] if reuse else [(None, runtime_kwargs)])
     assert (args.output / "config/esmfold2_scoring.yaml").is_file()
+
+
+def test_worker_accepts_xpu_devices_and_rejects_unavailable_backends(monkeypatch):
+    from types import SimpleNamespace
+
+    import torch
+    from boltzgen.task.esmfold2.worker import validate_device
+
+    monkeypatch.setattr(
+        torch,
+        "xpu",
+        SimpleNamespace(is_available=lambda: True, set_device=lambda device: None),
+        raising=False,
+    )
+    assert validate_device("xpu:2") == torch.device("xpu:2")
+    monkeypatch.setattr(torch.xpu, "is_available", lambda: False)
+    with pytest.raises(RuntimeError, match="XPU"):
+        validate_device("xpu:0")
+    with pytest.raises(RuntimeError, match="CUDA or XPU"):
+        validate_device("cpu")
+
+
+def test_auto_acceleration_uses_native_execution_on_xpu():
+    import torch
+    from boltzgen.task.esmfold2.acceleration import acceleration_context
+    from boltzgen.task.esmfold2.contract import ACCELERATION_REVISION
+
+    if not hasattr(torch, "xpu") or not torch.xpu.is_available():
+        pytest.skip("XPU is unavailable")
+    model = torch.nn.Linear(2, 2, device="xpu").eval().requires_grad_(False)
+    options = dict(acceleration="auto", acceleration_revision=ACCELERATION_REVISION)
+    with acceleration_context(model, options) as execution:
+        assert execution["effective"] == "off"
+        assert "XPU" in execution["fallback_reason"]
+
+
+def test_run_request_aligns_esmc_dtype_to_bfloat16_xpu_model_weights(
+    monkeypatch, tmp_path
+):
+    from types import SimpleNamespace
+
+    import torch
+    from boltzgen.task.esmfold2 import worker
+    from boltzgen.task.esmfold2.contract import ACCELERATION_REVISION
+
+    if not hasattr(torch, "xpu") or not torch.xpu.is_available():
+        pytest.skip("XPU is unavailable")
+
+    features = {
+        "input_ids": torch.tensor([[1, 2]]),
+        "asym_id": torch.tensor([[0, 1]]),
+        "residue_index": torch.tensor([[0, 0]]),
+        "mol_type": torch.tensor([[0, 0]]),
+        "token_attention_mask": torch.ones((1, 2), dtype=torch.bool),
+        "atom_attention_mask": torch.ones((1, 2), dtype=torch.bool),
+    }
+    monkeypatch.setattr(
+        worker, "prepare_request", lambda request, builder: (features, [])
+    )
+    monkeypatch.setattr(
+        worker,
+        "crop_features",
+        lambda full, infos, chains: (
+            features,
+            infos,
+            torch.tensor([0, 1]),
+            {},
+        ),
+    )
+    monkeypatch.setattr(
+        worker,
+        "polymer_representatives",
+        lambda cropped, infos: {"A": [0], "B": [1]},
+    )
+    monkeypatch.setattr(
+        worker, "write_structure", lambda path, *args: path.write_text("test")
+    )
+
+    class ModelBoundary(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.language_model = torch.nn.Sequential(
+                torch.nn.LayerNorm(4, device="xpu", dtype=torch.bfloat16)
+            )
+            self.config = SimpleNamespace(
+                lm_encoder=SimpleNamespace(lm_dropout=0.0, per_loop_lm_dropout=False)
+            )
+
+        def _compute_lm_hidden_states(self, input_ids, *args, **kwargs):
+            return torch.ones(
+                (*input_ids.shape, 4), device=input_ids.device, dtype=torch.float32
+            )
+
+        def forward(self, **kwargs):
+            assert (
+                kwargs["lm_hidden_states"].dtype
+                == self.language_model[0].weight.dtype
+            )
+            self.language_model(kwargs["lm_hidden_states"])
+            return {
+                "pae": torch.tensor([[[0.0, 1.0], [1.0, 0.0]]]),
+                "sample_atom_coords": torch.zeros((1, 2, 3)),
+                "plddt": torch.ones((1, 2)),
+            }
+
+    request = {
+        "design_id": "xpu_precision",
+        "design_sha256": "test",
+        "chains": [
+            {"id": "A", "mol_type": 0, "residue_names": ["ALA"]},
+            {"id": "B", "mol_type": 0, "residue_names": ["ALA"]},
+        ],
+        "design_chains": ["B"],
+        "target_chains": ["A"],
+        "nucleic_acid": False,
+        "options": {
+            "seed": 123,
+            "lm_dropout": 0.0,
+            "num_loops": 1,
+            "sampling_steps": 1,
+            "diffusion_samples": 1,
+            "acceleration": "auto",
+            "acceleration_revision": ACCELERATION_REVISION,
+        },
+    }
+
+    worker.run_request(ModelBoundary(), object(), request, tmp_path, "xpu:0")
+
+    result = json.loads((tmp_path / "xpu_precision.json").read_text())
+    assert result["execution"]["fallback_reason"].startswith(
+        "CUDA graph acceleration is unavailable on XPU"
+    )
 
 
 def test_missing_scores_and_changed_protocol_cannot_reuse_old_results(tmp_path):

@@ -202,6 +202,7 @@ class _InferenceBoundary:
         self.inverse_fold = False
         self.confidence_prediction = True
         self.token_level_confidence = True
+        self.use_kernels = False
         self.alpha_pae = 1
         self.affinity_prediction = False
         self.inference_counter = 0

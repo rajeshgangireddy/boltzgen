@@ -30,6 +30,7 @@ from boltzgen.cli.boltzgen import (
 )
 from boltzgen.data import const
 from boltzgen.model.modules.masker import BoltzMasker
+from boltzgen.task.predict import predict_solublempnn
 from boltzgen.task.predict.predict_solublempnn import SolubleMPNN
 from boltzgen.task.predict.writer import DesignWriter
 
@@ -117,6 +118,8 @@ def test_pipeline_selects_model_without_fetching_other_weights(
         "3",
         "--num_workers",
         "0",
+        "--seed",
+        "123",
         "--reuse",
         "--design_checkpoints",
         str(checkpoint),
@@ -162,6 +165,7 @@ def test_pipeline_selects_model_without_fetching_other_weights(
     assert config.checkpoint == str(checkpoint)
     assert config.data.cfg.multiplicity == 3
     assert config.writer.inverse_fold
+    assert config.seed == 123
     restrictions = (
         ["CYS"]
         if protocol in {"peptide-anything", "nanobody-anything", "antibody-anything"}
@@ -278,6 +282,55 @@ def test_invalid_exclusions_fail_before_loading_weights():
         SolubleMPNN("unused.pt", inverse_fold_restriction=const.canonical_tokens)
     with pytest.raises(ValueError, match="canonical residue names"):
         SolubleMPNN("unused.pt", inverse_fold_restriction=["invalid"])
+
+
+def test_predictor_uses_device_aware_lightning_strategy(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    trainer_options = {}
+
+    class FakeTrainer:
+        def __init__(self, **kwargs):
+            trainer_options.update(kwargs)
+
+        def predict(self, model, *, datamodule, return_predictions):
+            assert return_predictions is False
+
+    monkeypatch.setattr(predict_solublempnn, "Trainer", FakeTrainer)
+    monkeypatch.setattr(
+        predict_solublempnn,
+        "SolubleMPNN",
+        lambda *args, **kwargs: SimpleNamespace(eval=lambda: None),
+    )
+    monkeypatch.setattr(
+        predict_solublempnn,
+        "resolve_trainer_kwargs",
+        lambda devices: ("xpu", "xpu_single"),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        predict_solublempnn,
+        "xpu_precision_plugin",
+        lambda precision: None,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        predict_solublempnn, "seed_everything", lambda seed, workers: None
+    )
+    task = predict_solublempnn.PredictSolubleMPNN(
+        data=SimpleNamespace(predict_set=[object()]),
+        writer=object(),
+        checkpoint="unused.pt",
+        output=str(tmp_path),
+        name="test",
+        trainer={"accelerator": "gpu", "devices": 1, "precision": 32},
+        seed=17,
+    )
+
+    task.run()
+
+    assert trainer_options["accelerator"] == "xpu"
+    assert trainer_options["strategy"] == "xpu_single"
 
 
 @pytest.mark.parametrize(
@@ -493,7 +546,9 @@ def test_memory_failure_skips_one_sample_and_continues(real_task, monkeypatch):
     model = SolubleMPNN(real_task.checkpoint).eval()
     sample = model.model.sample
     cleared = []
-    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: cleared.append(True))
+    monkeypatch.setattr(
+        predict_solublempnn, "empty_cache", lambda: cleared.append(True)
+    )
 
     def fail_once(features):
         monkeypatch.setattr(model.model, "sample", sample)

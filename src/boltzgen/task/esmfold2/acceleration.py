@@ -39,6 +39,11 @@ def acceleration_context(model, options: dict):
     """Scope all optimized state to one request, with native fallback."""
     mode = options.get("acceleration", "off")
     validate_acceleration(mode)
+    device = next(
+        (parameter.device for parameter in model.parameters()), torch.device("cpu")
+    )
+    if device.type == "xpu" and mode == "fused":
+        raise ValueError("Fused ESMFold2 acceleration requires CUDA")
     if (mode == "fused") != getattr(model, "_boltzgen_fused_backend", False):
         raise ValueError(
             "Fused and native requests need separate ESMFold2 model instances"
@@ -50,6 +55,12 @@ def acceleration_context(model, options: dict):
         "kernel_backend": "fused" if mode == "fused" else "native",
     }
     if mode == "off":
+        yield execution
+        return
+    if device.type == "xpu":
+        execution["fallback_reason"] = (
+            "CUDA graph acceleration is unavailable on XPU; using native execution"
+        )
         yield execution
         return
     if options.get("acceleration_revision") != ACCELERATION_REVISION:

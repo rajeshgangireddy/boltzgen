@@ -788,7 +788,17 @@ def configure_command(args: argparse.Namespace) -> None:
             # Reuse can finish entirely from saved scores. Provision that run's
             # runtime only if the scoring task finds work still to compute.
             if not esm_config.reuse:
-                resolve_python(esm_config.python, require_cuda=True)
+                device_type = accelerator_type()
+                if device_type not in ("cuda", "xpu"):
+                    raise RuntimeError(
+                        "ESMFold2 scoring requires a CUDA or XPU accelerator"
+                    )
+                runtime_kwargs = (
+                    {"require_xpu": True}
+                    if device_type == "xpu"
+                    else {"require_cuda": True}
+                )
+                resolve_python(esm_config.python, **runtime_kwargs)
 
     # Make the config subdir in output
     config_dir = output_dir / "config"

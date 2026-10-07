@@ -1,18 +1,25 @@
 """Automatically provision ESMFold2 without changing BoltzGen's environment."""
 
-from pathlib import Path
 import subprocess
+from pathlib import Path
 
 from boltzgen.task.esmfold2.contract import ESM_VERSION
 
 
-def resolve_python(python: str | None = None, *, require_cuda: bool = False) -> str:
+def resolve_python(
+    python: str | None = None,
+    *,
+    require_cuda: bool = False,
+    require_xpu: bool = False,
+) -> str:
     """Return a checked interpreter, provisioning a cached runtime when needed.
 
     uv owns dependency resolution, environment locking and Python installation.
     Its tool cache is independent of the active environment and current project.
     A caller-supplied interpreter remains available for managed/offline installs.
     """
+    if require_cuda and require_xpu:
+        raise ValueError("The ESMFold2 runtime can target only one accelerator")
     if python is None:
         from uv import find_uv_bin
 
@@ -25,14 +32,20 @@ def resolve_python(python: str | None = None, *, require_cuda: bool = False) -> 
             "run",
             "--isolated",
             "--no-config",
-            "--python",
-            "3.12",
-            "--from",
-            f"esm=={ESM_VERSION}",
-            "--with-requirements",
-            str(requirements),
-            "python",
         ]
+        if require_xpu:
+            command.extend(["--torch-backend", "xpu"])
+        command.extend(
+            [
+                "--python",
+                "3.12",
+                "--from",
+                f"esm=={ESM_VERSION}",
+                "--with-requirements",
+                str(requirements),
+                "python",
+            ]
+        )
     probe = (
         "import sys; from importlib.metadata import version; "
         "assert sys.version_info >= (3, 12); "
@@ -42,8 +55,14 @@ def resolve_python(python: str | None = None, *, require_cuda: bool = False) -> 
     if require_cuda:
         probe += (
             "assert torch.cuda.is_available(), "
-            "'ESMFold2 requires a visible GPU and CUDA 13 compatible driver'; "
+            "'ESMFold2 requires an available CUDA device'; "
             "torch.empty(1, device='cuda').add_(1); torch.cuda.synchronize(); "
+        )
+    elif require_xpu:
+        probe += (
+            "assert hasattr(torch, 'xpu') and torch.xpu.is_available(), "
+            "'ESMFold2 requires an available Intel XPU'; "
+            "torch.empty(1, device='xpu').add_(1); torch.xpu.synchronize(); "
         )
     probe += "print(sys.executable)"
     try:
@@ -83,7 +102,7 @@ def resolve_python(python: str | None = None, *, require_cuda: bool = False) -> 
         )
     except (OSError, subprocess.CalledProcessError) as exc:
         raise RuntimeError(
-            "Could not prepare the ESMFold2 runtime. See the installer/import/CUDA "
+            "Could not prepare the ESMFold2 runtime. See the installer/import/device "
             "error above and check the interpreter, dependencies, and GPU driver. "
             "An uncached installation also needs network access and space in the uv "
             "cache. Managed installations may set --esmfold2_python."

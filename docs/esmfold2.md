@@ -44,21 +44,23 @@ polymer protocols because their calibration does not describe ESMFold2 scores.
 
 ## Installation and use
 
-Installation and normal use keep the same commands:
+Install this checkout with the matching backend extra described in the
+repository [README](../README.md#installation):
 
 ```bash
-pip install boltzgen
-boltzgen run design.yaml --output results --protocol protein-anything
+uv sync --extra cuda  # or --extra xpu
+.venv/bin/boltzgen run design.yaml --output results --protocol protein-anything
 ```
 
 BoltzGen includes uv and automatically prepares a cached ESMFold2 runtime before
 starting a fresh design run. It obtains Python 3.12 if needed and installs the pinned
 dependency set shipped in the wheel. Later runs try the complete local cache
-first, without network access. A fresh run checks that this runtime can execute
-a CUDA operation before starting design. The main
-BoltzGen environment retains its Python >=3.11 support and existing dependencies;
-ESMFold2's Torch/CUDA packages are isolated from it. The small-molecule protocol
-does not prepare or download the ESMFold2 runtime.
+first, without network access. The runtime is checked against the active
+accelerator before design: CUDA runs validate a CUDA operation, and XPU runs
+select uv's XPU PyTorch backend and validate an XPU operation. The main BoltzGen
+environment retains its Python >=3.11 support and existing dependencies;
+ESMFold2's Torch and accelerator packages are isolated from it. The
+small-molecule protocol does not prepare or download the ESMFold2 runtime.
 
 With `--reuse`, runtime setup is deferred until a design actually needs a new
 score. A run with complete matching scores can reuse them offline without an
@@ -67,11 +69,15 @@ ESMFold2 runtime cache.
 First use requires network access and approximately 33 GB of additional disk
 space (about 27 GB of ESM weights and 6 GB for the runtime), plus temporary
 installation space. This is in addition to BoltzGen's existing downloads.
-ESMFold2's upstream
-runtime requires a CUDA 13 compatible NVIDIA driver; automatic environment
-setup cannot upgrade the host driver. Each worker loads its model once and
-scores its shard of designs. `--devices` controls the number of workers over
-the visible GPUs. Weights use Hugging Face's ordinary cache (`HF_HOME`), and
+ESMFold2 requires either a compatible CUDA/NVIDIA setup or an Intel XPU with a
+working PyTorch XPU driver; CPU-only scoring is not supported. On XPU, `auto`
+uses native PyTorch execution and skips CUDA graphs and fused CUDA kernels.
+The optional CUDA cuequivariance extension may log that `libnvrtc.so.13` is
+unavailable on XPU; this does not prevent native scoring.
+Automatic environment setup cannot install or upgrade host GPU drivers. Each
+worker loads its model once and scores its shard of designs. `--devices`
+controls the number of workers over the visible accelerators. Weights use
+Hugging Face's ordinary cache (`HF_HOME`), and
 the isolated runtime uses uv's cache (`UV_CACHE_DIR`). `--cache` continues to
 control Boltz downloads. These environment variables are optional cache-location
 controls, not installation steps. For containers, persist both caches if you
@@ -81,7 +87,7 @@ Before downloading, BoltzGen prints the resolved checkpoint cache directory
 (normally `~/.cache/huggingface/hub`). `HF_HOME` changes the Hugging Face cache
 root, while `HF_HUB_CACHE` directly overrides the checkpoint cache directory.
 Startup messages distinguish runtime installation, chemical component data,
-each checkpoint download, loading weights into memory, and transfer to the GPU.
+each checkpoint download, loading weights into memory, and transfer to the accelerator.
 Download progress bars come from Hugging Face; they may be disabled in some
 environments. Loading cached weights can also take several minutes without a
 download progress bar. Each completed download prints its local snapshot path,
@@ -89,10 +95,12 @@ and a final message announces when the model is ready for scoring.
 
 For an administrator-managed or pre-provisioned offline installation,
 `--esmfold2_python /path/to/python` or `BOLTZGEN_ESMFOLD2_PYTHON` remains an optional
-override. That interpreter needs the dependencies in
-`src/boltzgen/resources/runtime/esmfold2.txt`; it does not need BoltzGen installed.
-The worker loads only BoltzGen's own code, with Python environment isolation
-enabled, so the parent environment cannot shadow its dependencies.
+override. That interpreter needs `esm==3.4.1.post1`, the dependencies in
+`src/boltzgen/resources/runtime/esmfold2.txt`, and a Torch build matching the
+active accelerator (the XPU runtime is provisioned with uv's `--torch-backend
+xpu` option); it does not need BoltzGen installed. The worker loads only
+BoltzGen's own code, with Python environment isolation enabled, so the parent
+environment cannot shadow its dependencies.
 
 Pinned artifacts:
 
@@ -113,13 +121,16 @@ template is supplied to ESMFold2.
 See [H200 measurements and reproduction commands](esmfold2-performance.md).
 
 ESMFold2 scoring uses `--esmfold2_acceleration auto` by default. Installation
-and runtime dependencies are unchanged. The worker adapts three techniques from
+and runtime dependencies are unchanged. On CUDA, the worker adapts three techniques from
 [Anthropic's public optimization kit](https://github.com/anthropics/uplifting-biomolecular-modeling/tree/f4f62fa6592ae4938d49b1757bea0cfeff9f468e/esmfold2):
 reuse the atom-attention mask within an input, transfer the diffusion schedule
 to the CPU once, and replay CUDA graphs for the recycling trunk and deterministic
 diffusion forward. The native precision and kernel backend remain unchanged.
 This is a port of these techniques to the pinned native ESM implementation,
 not an installation of the kit's older Transformers stack or its `fast` kernels.
+On XPU, `auto` records a native-execution fallback; CUDA graphs and fused
+acceleration are unavailable. `--esmfold2_acceleration fused` is CUDA-only and
+is rejected on XPU.
 
 For additional speed, `--esmfold2_acceleration fused` combines the adapter with
 ESMFold2's bundled fused Triton/BF16 backend and unchunked pair operations, the

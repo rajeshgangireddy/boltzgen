@@ -40,6 +40,37 @@ from boltzgen.task.esmfold2.ipsae import score_chain_vs_rest, score_interface
 from boltzgen.task.esmfold2.acceleration import acceleration_context
 
 
+def validate_device(device: str) -> torch.device:
+    """Accept only a visible CUDA or Intel XPU device."""
+    selected = torch.device(device)
+    if selected.type == "cuda":
+        available = torch.cuda.is_available()
+        backend_name = "CUDA"
+        set_device = torch.cuda.set_device
+    elif selected.type == "xpu":
+        xpu = getattr(torch, "xpu", None)
+        available = xpu is not None and xpu.is_available()
+        backend_name = "XPU"
+        set_device = xpu.set_device if xpu is not None else None
+    else:
+        raise RuntimeError("ESMFold2 scoring supports CUDA or XPU devices")
+    if not available:
+        raise RuntimeError(
+            f"ESMFold2 scoring requires an available {backend_name} device"
+        )
+    set_device(selected)
+    return selected
+
+
+def seed_device_rng(seed: int, device: torch.device) -> None:
+    """Seed CPU and selected accelerator RNGs for reproducible sampling."""
+    torch.manual_seed(seed)
+    if device.type == "cuda":
+        torch.cuda.manual_seed_all(seed)
+    elif device.type == "xpu":
+        torch.xpu.manual_seed_all(seed)
+
+
 def configure_ccd() -> None:
     """Resolve the pinned CCD before importing ESM, which snapshots the path."""
     from huggingface_hub import hf_hub_download
@@ -288,12 +319,10 @@ def run_request(model, builder, request: dict, output: Path, device: str) -> Non
             options["diffusion_samples"],
             model.config.pairwise_hidden_size,
         )
-    torch.manual_seed(options["seed"])
-    torch.cuda.manual_seed_all(options["seed"])
-    full = {k: v.to(device) for k, v in full.items()}
-    cropped = {k: v.to(device) for k, v in cropped.items()}
-    # The native model controls mixed precision around its LM and trunk. An
-    # outer autocast would also change the diffusion/confidence heads' precision.
+    selected_device = torch.device(device)
+    seed_device_rng(options["seed"], selected_device)
+    full = {k: v.to(selected_device) for k, v in full.items()}
+    cropped = {k: v.to(selected_device) for k, v in cropped.items()}
     with torch.inference_mode():
         full_lm = model._compute_lm_hidden_states(
             full["input_ids"],
@@ -305,7 +334,11 @@ def run_request(model, builder, request: dict, output: Path, device: str) -> Non
         )
         if full_lm.shape[:2] != full["input_ids"].shape:
             raise ValueError("ESMC did not encode the complete original source chains")
-        crop_lm = full_lm.index_select(1, selected.to(device))
+        crop_lm = full_lm.index_select(1, selected.to(selected_device))
+        if selected_device.type == "xpu":
+            # The CUDA-only model autocast leaves FP32 ESMC states mismatched
+            # with the BF16 language projection on XPU.
+            crop_lm = crop_lm.to(dtype=next(model.language_model.parameters()).dtype)
         audit["full_lm_shape"] = list(full_lm.shape)
         audit["crop_lm_shape"] = list(crop_lm.shape)
         del full_lm, full
@@ -447,17 +480,20 @@ def main() -> None:
     args = parser.parse_args()
     paths = json.loads(args.manifest.read_text())
     requests = [json.loads(Path(path).read_text()) for path in paths]
+    device = validate_device(args.device)
     fused_modes = {
         request["options"].get("acceleration", "off") == "fused" for request in requests
     }
     if len(fused_modes) > 1:
         raise ValueError("Fused and native requests must use separate ESMFold2 workers")
+    if device.type != "cuda" and fused_modes == {True}:
+        raise ValueError(
+            "Fused ESMFold2 acceleration requires CUDA; XPU uses native execution"
+        )
     if version("esm") != ESM_VERSION:
         raise RuntimeError(
             f"Install esm=={ESM_VERSION} in the --esmfold2_python environment"
         )
-    if not torch.cuda.is_available():
-        raise RuntimeError("ESMFold2 scoring requires a CUDA GPU")
     from huggingface_hub import constants, snapshot_download
 
     print(

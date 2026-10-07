@@ -3,9 +3,9 @@
 import json
 import logging
 import os
-from pathlib import Path
 import subprocess
 import tempfile
+from pathlib import Path
 
 import numpy as np
 from rdkit import Chem
@@ -21,11 +21,12 @@ from boltzgen.task.esmfold2.contract import (
     file_sha256,
     fingerprint,
     load_result,
-    validate_scoring_mode,
     validate_acceleration,
+    validate_scoring_mode,
 )
-from boltzgen.task.task import Task
 from boltzgen.task.esmfold2.runtime import resolve_python, worker_command
+from boltzgen.task.task import Task
+from boltzgen.utils.device import accelerator_type
 
 logger = logging.getLogger(__name__)
 
@@ -282,7 +283,15 @@ class ESMFold2Score(Task):
         # Resolve first so an offline cache miss cannot replace valid prior
         # artifacts. Workers write into an isolated staging directory; publish a
         # design's request only after its complete result validates.
-        python = resolve_python(self.python)
+        device_type = accelerator_type()
+        if device_type not in ("cuda", "xpu"):
+            raise RuntimeError("ESMFold2 scoring requires a CUDA or XPU accelerator")
+        runtime_kwargs = (
+            {"require_xpu": True}
+            if device_type == "xpu"
+            else {"require_cuda": True}
+        )
+        python = resolve_python(self.python, **runtime_kwargs)
         workers = []
         with tempfile.TemporaryDirectory(prefix=".esmfold2-stage-", dir=outdir) as temp:
             staging_dir = Path(temp)
@@ -304,7 +313,7 @@ class ESMFold2Score(Task):
                     manifest.write_text(json.dumps(worker_requests))
                     workers.append(
                         subprocess.Popen(
-                            worker_command(python, manifest, f"cuda:{index}"),
+                            worker_command(python, manifest, f"{device_type}:{index}"),
                         )
                     )
                 codes = [worker.wait() for worker in workers]

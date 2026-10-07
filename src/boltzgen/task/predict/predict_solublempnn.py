@@ -8,7 +8,12 @@ from collections import defaultdict
 import torch
 import torch.nn.functional as F
 from omegaconf import ListConfig, OmegaConf
-from pytorch_lightning import LightningDataModule, LightningModule, Trainer
+from pytorch_lightning import (
+    LightningDataModule,
+    LightningModule,
+    Trainer,
+    seed_everything,
+)
 
 from boltzgen._vendor.ligandmpnn import ProteinMPNN
 from boltzgen.data import const
@@ -17,6 +22,11 @@ from boltzgen.model.modules.inverse_fold import build_constraint_logit_mask
 from boltzgen.model.modules.masker import BoltzMasker
 from boltzgen.task.predict.writer import DesignWriter
 from boltzgen.task.task import Task
+from boltzgen.utils.device import (
+    empty_cache,
+    resolve_trainer_kwargs,
+    xpu_precision_plugin,
+)
 from boltzgen.utils.pipeline_progress_bar import PipelineProgressBar
 from boltzgen.utils.quiet import quiet_startup
 
@@ -143,7 +153,7 @@ class SolubleMPNN(LightningModule):
             if "out of memory" not in str(error):
                 raise
             logger.warning("Ran out of memory, skipping inverse-folding batch")
-            torch.cuda.empty_cache()
+            empty_cache()
             return {"exception": True}
 
     def _predict(self, batch: dict) -> dict:
@@ -264,6 +274,7 @@ class PredictSolubleMPNN(Task):
         tie_symmetric_sequences: bool = True,
         trainer: dict | None = None,
         matmul_precision: str | None = None,
+        seed: int | None = None,
     ) -> None:
         self.data = data
         self.writer = writer
@@ -275,6 +286,7 @@ class PredictSolubleMPNN(Task):
         self.tie_symmetric_sequences = tie_symmetric_sequences
         self.trainer = dict(trainer or {})
         self.matmul_precision = matmul_precision
+        self.seed = seed
 
     def run(self, config: OmegaConf | None = None) -> None:
         """Load the weights and write sequences using the configured data module."""
@@ -300,7 +312,18 @@ class PredictSolubleMPNN(Task):
             trainer_args["devices"] = list(devices)[:num_samples]
         elif isinstance(devices, int) and devices > num_samples:
             trainer_args["devices"] = num_samples
+        accelerator, strategy = resolve_trainer_kwargs(trainer_args["devices"])
+        trainer_args["accelerator"] = accelerator
+        precision_plugin = xpu_precision_plugin(trainer_args.get("precision"))
+        if precision_plugin is not None:
+            trainer_args.pop("precision")
+            trainer_args["plugins"] = precision_plugin
+        if self.seed is not None:
+            seed_everything(self.seed, workers=True)
         trainer = Trainer(
-            default_root_dir=self.output, callbacks=callbacks, **trainer_args
+            default_root_dir=self.output,
+            callbacks=callbacks,
+            strategy=strategy,
+            **trainer_args,
         )
         trainer.predict(model, datamodule=self.data, return_predictions=False)
