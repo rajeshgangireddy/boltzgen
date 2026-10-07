@@ -789,13 +789,15 @@ def configure_command(args: argparse.Namespace) -> None:
             # runtime only if the scoring task finds work still to compute.
             if not esm_config.reuse:
                 device_type = accelerator_type()
-                if device_type not in ("cuda", "xpu"):
+                if device_type not in ("cuda", "xpu", "cpu"):
                     raise RuntimeError(
-                        "ESMFold2 scoring requires a CUDA or XPU accelerator"
+                        "ESMFold2 scoring requires a CUDA, XPU, or CPU device"
                     )
                 runtime_kwargs = (
                     {"require_xpu": True}
                     if device_type == "xpu"
+                    else {"require_cpu": True}
+                    if device_type == "cpu"
                     else {"require_cuda": True}
                 )
                 resolve_python(esm_config.python, **runtime_kwargs)

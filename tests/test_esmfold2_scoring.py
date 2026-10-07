@@ -28,12 +28,26 @@ def test_fused_size_rejects_index_overflow_before_gpu_execution():
         validate_fused_size(2897, 1, 256)
 
 
+def test_hidden_cuda_device_is_treated_as_cpu(monkeypatch):
+    import torch
+    from boltzgen.utils.device import accelerator_type, device_capability_safe
+
+    monkeypatch.setattr(torch.accelerator, "current_accelerator", lambda: torch.device("cuda"))
+    monkeypatch.setattr(torch.accelerator, "is_available", lambda: False)
+    monkeypatch.setattr(
+        torch.cuda, "get_device_capability", lambda: pytest.fail("No CUDA device is visible")
+    )
+    assert accelerator_type() == "cpu"
+    assert device_capability_safe() is None
+
+
 @pytest.mark.parametrize("cached", [False, True])
 @pytest.mark.parametrize(
     "runtime_kwargs,backend",
     [
         ({"require_cuda": True}, "cuda"),
         ({"require_xpu": True}, "xpu"),
+        ({"require_cpu": True}, "cpu"),
     ],
 )
 def test_runtime_uses_cache_offline_and_provisions_only_when_needed(
@@ -58,10 +72,14 @@ def test_runtime_uses_cache_offline_and_provisions_only_when_needed(
     if backend == "cuda":
         assert "torch.cuda.is_available()" in calls[-1][-1]
         assert "--torch-backend" not in calls[0]
-    else:
+    elif backend == "xpu":
         assert "torch.xpu.is_available()" in calls[-1][-1]
         assert "--torch-backend" in calls[0]
         assert "xpu" in calls[0]
+    else:
+        assert "device='cpu'" in calls[-1][-1]
+        assert "--torch-backend" in calls[0]
+        assert "cpu" in calls[0]
     if not cached:
         assert "--offline" not in calls[1]
 
@@ -102,6 +120,15 @@ def test_runtime_override_failure_does_not_silently_install_another_runtime(
         runtime.resolve_python("/managed/python")
     assert len(calls) == 1
     assert calls[0][0] == "/managed/python"
+
+
+def test_runtime_rejects_conflicting_device_backends():
+    from boltzgen.task.esmfold2.runtime import resolve_python
+
+    with pytest.raises(ValueError, match="only one accelerator"):
+        resolve_python(require_cpu=True, require_cuda=True)
+    with pytest.raises(ValueError, match="only one accelerator"):
+        resolve_python(require_cpu=True, require_xpu=True)
 
 
 def test_ipsae_directionality_cutoff_and_nucleic_acid_normalization():
@@ -245,6 +272,7 @@ def test_ranking_and_tiebreak_follow_esmfold2(tmp_path):
     [
         ("cuda", {"require_cuda": True}),
         ("xpu", {"require_xpu": True}),
+        ("cpu", {"require_cpu": True}),
     ],
 )
 @pytest.mark.parametrize(
@@ -311,7 +339,7 @@ def test_configure_validates_settings_before_runtime_setup(
     assert (args.output / "config/esmfold2_scoring.yaml").is_file()
 
 
-def test_worker_accepts_xpu_devices_and_rejects_unavailable_backends(monkeypatch):
+def test_worker_accepts_xpu_and_cpu_devices_and_rejects_unavailable_backends(monkeypatch):
     from types import SimpleNamespace
 
     import torch
@@ -327,8 +355,9 @@ def test_worker_accepts_xpu_devices_and_rejects_unavailable_backends(monkeypatch
     monkeypatch.setattr(torch.xpu, "is_available", lambda: False)
     with pytest.raises(RuntimeError, match="XPU"):
         validate_device("xpu:0")
-    with pytest.raises(RuntimeError, match="CUDA or XPU"):
-        validate_device("cpu")
+    assert validate_device("cpu:0") == torch.device("cpu:0")
+    with pytest.raises(RuntimeError, match="CUDA, XPU, or CPU"):
+        validate_device("meta")
 
 
 def test_auto_acceleration_uses_native_execution_on_xpu():
@@ -345,8 +374,24 @@ def test_auto_acceleration_uses_native_execution_on_xpu():
         assert "XPU" in execution["fallback_reason"]
 
 
-def test_run_request_aligns_esmc_dtype_to_bfloat16_xpu_model_weights(
-    monkeypatch, tmp_path
+def test_auto_acceleration_uses_native_execution_on_cpu():
+    import torch
+    from boltzgen.task.esmfold2.acceleration import acceleration_context
+    from boltzgen.task.esmfold2.contract import ACCELERATION_REVISION
+
+    model = torch.nn.Linear(2, 2).eval().requires_grad_(False)
+    options = dict(acceleration="auto", acceleration_revision=ACCELERATION_REVISION)
+    with acceleration_context(model, options) as execution:
+        assert execution["effective"] == "off"
+        assert "CPU" in execution["fallback_reason"]
+    with pytest.raises(ValueError, match="requires CUDA"):
+        with acceleration_context(model, {**options, "acceleration": "fused"}):
+            pytest.fail("Fused scoring must reject CPU before running")
+
+
+@pytest.mark.parametrize("device", ["cpu", "xpu"])
+def test_run_request_aligns_esmc_dtype_to_bfloat16_model_weights(
+    monkeypatch, tmp_path, device
 ):
     from types import SimpleNamespace
 
@@ -354,7 +399,7 @@ def test_run_request_aligns_esmc_dtype_to_bfloat16_xpu_model_weights(
     from boltzgen.task.esmfold2 import worker
     from boltzgen.task.esmfold2.contract import ACCELERATION_REVISION
 
-    if not hasattr(torch, "xpu") or not torch.xpu.is_available():
+    if device == "xpu" and (not hasattr(torch, "xpu") or not torch.xpu.is_available()):
         pytest.skip("XPU is unavailable")
 
     features = {
@@ -391,7 +436,7 @@ def test_run_request_aligns_esmc_dtype_to_bfloat16_xpu_model_weights(
         def __init__(self):
             super().__init__()
             self.language_model = torch.nn.Sequential(
-                torch.nn.LayerNorm(4, device="xpu", dtype=torch.bfloat16)
+                torch.nn.LayerNorm(4, device=device, dtype=torch.bfloat16)
             )
             self.config = SimpleNamespace(
                 lm_encoder=SimpleNamespace(lm_dropout=0.0, per_loop_lm_dropout=False)
@@ -435,11 +480,11 @@ def test_run_request_aligns_esmc_dtype_to_bfloat16_xpu_model_weights(
         },
     }
 
-    worker.run_request(ModelBoundary(), object(), request, tmp_path, "xpu:0")
+    worker.run_request(ModelBoundary(), object(), request, tmp_path, f"{device}:0")
 
     result = json.loads((tmp_path / "xpu_precision.json").read_text())
     assert result["execution"]["fallback_reason"].startswith(
-        "CUDA graph acceleration is unavailable on XPU"
+        f"CUDA graph acceleration is unavailable on {device.upper()}"
     )
 
 

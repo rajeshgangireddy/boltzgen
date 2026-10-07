@@ -122,7 +122,7 @@ docker build --build-arg BACKEND=cuda --build-arg DOWNLOAD_WEIGHTS=true -t boltz
 > ⚡ **XPU:** No special flag is needed - the accelerator (CUDA/XPU/CPU) is auto-detected from whichever `torch` build is installed. Leave `--use_kernels` at its default (`auto`); it already resolves to `false` on XPU (the fused cuEquivariance triangle-attention kernels are CUDA-only, so `trunk`/`confidence` steps fall back to plain PyTorch and run slower than on an equivalent NVIDIA GPU).
 
 `boltzgen run` takes a [design specification](#how-to-make-a-design-specification-yaml) `.yaml` and produces a set of ranked designs.\
-⚠️ Models download automatically: ~6 GB for Boltz, plus ~33 GB for ESMFold2 weights and runtime. ESMFold2 scoring supports CUDA and Intel XPU; see [installation and cache settings](docs/esmfold2.md#installation-and-use).\
+⚠️ Models download automatically: ~6 GB for Boltz, plus ~33 GB for ESMFold2 weights and runtime. ESMFold2 scoring supports CUDA, Intel XPU, and CPU (slow, with substantial RAM needs); see [installation and cache settings](docs/esmfold2.md#installation-and-use).\
 ⚠️ If your run is ever interrupted, you can restart it with `--reuse`. No progress is lost.
 
 

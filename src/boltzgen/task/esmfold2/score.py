@@ -284,11 +284,13 @@ class ESMFold2Score(Task):
         # artifacts. Workers write into an isolated staging directory; publish a
         # design's request only after its complete result validates.
         device_type = accelerator_type()
-        if device_type not in ("cuda", "xpu"):
-            raise RuntimeError("ESMFold2 scoring requires a CUDA or XPU accelerator")
+        if device_type not in ("cuda", "xpu", "cpu"):
+            raise RuntimeError("ESMFold2 scoring requires a CUDA, XPU, or CPU device")
         runtime_kwargs = (
             {"require_xpu": True}
             if device_type == "xpu"
+            else {"require_cpu": True}
+            if device_type == "cpu"
             else {"require_cuda": True}
         )
         python = resolve_python(self.python, **runtime_kwargs)

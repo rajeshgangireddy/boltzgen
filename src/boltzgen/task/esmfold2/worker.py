@@ -41,7 +41,7 @@ from boltzgen.task.esmfold2.acceleration import acceleration_context
 
 
 def validate_device(device: str) -> torch.device:
-    """Accept only a visible CUDA or Intel XPU device."""
+    """Accept a visible CUDA or XPU device, or the CPU."""
     selected = torch.device(device)
     if selected.type == "cuda":
         available = torch.cuda.is_available()
@@ -52,8 +52,10 @@ def validate_device(device: str) -> torch.device:
         available = xpu is not None and xpu.is_available()
         backend_name = "XPU"
         set_device = xpu.set_device if xpu is not None else None
+    elif selected.type == "cpu":
+        return selected
     else:
-        raise RuntimeError("ESMFold2 scoring supports CUDA or XPU devices")
+        raise RuntimeError("ESMFold2 scoring supports CUDA, XPU, or CPU devices")
     if not available:
         raise RuntimeError(
             f"ESMFold2 scoring requires an available {backend_name} device"
@@ -335,9 +337,9 @@ def run_request(model, builder, request: dict, output: Path, device: str) -> Non
         if full_lm.shape[:2] != full["input_ids"].shape:
             raise ValueError("ESMC did not encode the complete original source chains")
         crop_lm = full_lm.index_select(1, selected.to(selected_device))
-        if selected_device.type == "xpu":
-            # The CUDA-only model autocast leaves FP32 ESMC states mismatched
-            # with the BF16 language projection on XPU.
+        if selected_device.type in ("xpu", "cpu"):
+            # CUDA-only autocast does not align the ESMC states with the
+            # language projection weights on these backends.
             crop_lm = crop_lm.to(dtype=next(model.language_model.parameters()).dtype)
         audit["full_lm_shape"] = list(full_lm.shape)
         audit["crop_lm_shape"] = list(crop_lm.shape)

@@ -11,6 +11,7 @@ def resolve_python(
     *,
     require_cuda: bool = False,
     require_xpu: bool = False,
+    require_cpu: bool = False,
 ) -> str:
     """Return a checked interpreter, provisioning a cached runtime when needed.
 
@@ -18,7 +19,7 @@ def resolve_python(
     Its tool cache is independent of the active environment and current project.
     A caller-supplied interpreter remains available for managed/offline installs.
     """
-    if require_cuda and require_xpu:
+    if sum((require_cuda, require_xpu, require_cpu)) > 1:
         raise ValueError("The ESMFold2 runtime can target only one accelerator")
     if python is None:
         from uv import find_uv_bin
@@ -35,6 +36,8 @@ def resolve_python(
         ]
         if require_xpu:
             command.extend(["--torch-backend", "xpu"])
+        elif require_cpu:
+            command.extend(["--torch-backend", "cpu"])
         command.extend(
             [
                 "--python",
@@ -64,6 +67,8 @@ def resolve_python(
             "'ESMFold2 requires an available Intel XPU'; "
             "torch.empty(1, device='xpu').add_(1); torch.xpu.synchronize(); "
         )
+    elif require_cpu:
+        probe += "torch.empty(1, device='cpu').add_(1); "
     probe += "print(sys.executable)"
     try:
         if python is None:
@@ -103,7 +108,7 @@ def resolve_python(
     except (OSError, subprocess.CalledProcessError) as exc:
         raise RuntimeError(
             "Could not prepare the ESMFold2 runtime. See the installer/import/device "
-            "error above and check the interpreter, dependencies, and GPU driver. "
+            "error above and check the interpreter, dependencies, and device backend. "
             "An uncached installation also needs network access and space in the uv "
             "cache. Managed installations may set --esmfold2_python."
         ) from exc

@@ -29,6 +29,8 @@ def accelerator_type() -> str:
 
     Returns ``"cpu"`` when no accelerator (CUDA/XPU/MPS/...) is available.
     """
+    if not torch.accelerator.is_available():
+        return "cpu"
     acc = torch.accelerator.current_accelerator()
     return acc.type if acc is not None else "cpu"
 

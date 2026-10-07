@@ -42,7 +42,7 @@ def acceleration_context(model, options: dict):
     device = next(
         (parameter.device for parameter in model.parameters()), torch.device("cpu")
     )
-    if device.type == "xpu" and mode == "fused":
+    if device.type != "cuda" and mode == "fused":
         raise ValueError("Fused ESMFold2 acceleration requires CUDA")
     if (mode == "fused") != getattr(model, "_boltzgen_fused_backend", False):
         raise ValueError(
@@ -57,9 +57,9 @@ def acceleration_context(model, options: dict):
     if mode == "off":
         yield execution
         return
-    if device.type == "xpu":
+    if device.type in ("xpu", "cpu"):
         execution["fallback_reason"] = (
-            "CUDA graph acceleration is unavailable on XPU; using native execution"
+            f"CUDA graph acceleration is unavailable on {device.type.upper()}; using native execution"
         )
         yield execution
         return

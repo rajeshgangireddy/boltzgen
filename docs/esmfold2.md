@@ -48,7 +48,7 @@ Install this checkout with the matching backend extra described in the
 repository [README](../README.md#installation):
 
 ```bash
-uv sync --extra cuda  # or --extra xpu
+uv sync --extra cuda  # or --extra xpu / --extra cpu
 .venv/bin/boltzgen run design.yaml --output results --protocol protein-anything
 ```
 
@@ -56,8 +56,9 @@ BoltzGen includes uv and automatically prepares a cached ESMFold2 runtime before
 starting a fresh design run. It obtains Python 3.12 if needed and installs the pinned
 dependency set shipped in the wheel. Later runs try the complete local cache
 first, without network access. The runtime is checked against the active
-accelerator before design: CUDA runs validate a CUDA operation, and XPU runs
-select uv's XPU PyTorch backend and validate an XPU operation. The main BoltzGen
+backend before design: CUDA runs validate a CUDA operation, XPU runs
+select uv's XPU PyTorch backend and validate an XPU operation, and CPU runs
+select uv's CPU backend and validate a CPU operation. The main BoltzGen
 environment retains its Python >=3.11 support and existing dependencies;
 ESMFold2's Torch and accelerator packages are isolated from it. The
 small-molecule protocol does not prepare or download the ESMFold2 runtime.
@@ -69,9 +70,11 @@ ESMFold2 runtime cache.
 First use requires network access and approximately 33 GB of additional disk
 space (about 27 GB of ESM weights and 6 GB for the runtime), plus temporary
 installation space. This is in addition to BoltzGen's existing downloads.
-ESMFold2 requires either a compatible CUDA/NVIDIA setup or an Intel XPU with a
-working PyTorch XPU driver; CPU-only scoring is not supported. On XPU, `auto`
-uses native PyTorch execution and skips CUDA graphs and fused CUDA kernels.
+CUDA requires a compatible NVIDIA setup and XPU a working PyTorch XPU driver.
+CPU-only scoring works, but is much slower and requires substantial host RAM;
+the full `protein-anything` pipeline has been exercised on CPU with two designs.
+On XPU and CPU, `auto` uses native PyTorch execution and skips CUDA graphs and
+fused CUDA kernels.
 The optional CUDA cuequivariance extension may log that `libnvrtc.so.13` is
 unavailable on XPU; this does not prevent native scoring.
 Automatic environment setup cannot install or upgrade host GPU drivers. Each
@@ -128,9 +131,9 @@ to the CPU once, and replay CUDA graphs for the recycling trunk and deterministi
 diffusion forward. The native precision and kernel backend remain unchanged.
 This is a port of these techniques to the pinned native ESM implementation,
 not an installation of the kit's older Transformers stack or its `fast` kernels.
-On XPU, `auto` records a native-execution fallback; CUDA graphs and fused
-acceleration are unavailable. `--esmfold2_acceleration fused` is CUDA-only and
-is rejected on XPU.
+On XPU and CPU, `auto` records a native-execution fallback; CUDA graphs and
+fused acceleration are unavailable. `--esmfold2_acceleration fused` is
+CUDA-only and is rejected on XPU and CPU.
 
 For additional speed, `--esmfold2_acceleration fused` combines the adapter with
 ESMFold2's bundled fused Triton/BF16 backend and unchunked pair operations, the
