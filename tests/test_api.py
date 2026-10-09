@@ -67,6 +67,20 @@ def test_installed_git_revision_is_preserved_in_pipeline_receipts(
     assert api._source_revision() == revision
 
 
+def test_esm_runtime_keeps_venv_interpreter_symlink(
+    inputs: dict, tmp_path: Path
+) -> None:
+    python = tmp_path / "esm-venv/bin/python"
+    python.parent.mkdir(parents=True)
+    python.symlink_to(sys.executable)
+
+    request = PipelineRequest(**{**inputs, "esmfold2_python": python})
+
+    assert request.esmfold2_python == python
+    assert api._local_path(python, "ESM worker", preserve_symlink=True) == python
+    assert api._local_path(python, "ESM worker") == python.resolve()
+
+
 @pytest.fixture
 def inputs(tmp_path: Path) -> dict:
     spec = tmp_path / "input.yaml"
@@ -1131,7 +1145,10 @@ def test_cpu_run_does_not_seed_unused_accelerators(
 def test_esm_preflight_uses_only_the_offline_worker(
     inputs: dict, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    request = PipelineRequest(**inputs)
+    python = inputs["design_spec"].parent / "esm-venv/bin/python"
+    python.parent.mkdir(parents=True)
+    python.symlink_to(sys.executable)
+    request = PipelineRequest(**{**inputs, "esmfold2_python": python})
     ccd = request.design_spec.parent / "ccd.pkl"
     ccd.write_bytes(b"ccd")
     model = request.design_spec.parent / "esmfold2"

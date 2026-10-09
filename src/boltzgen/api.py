@@ -162,7 +162,12 @@ class PipelineRequest:
         ):
             value = getattr(self, name)
             if value is not None:
-                object.__setattr__(self, name, Path(value).expanduser().resolve())
+                path = Path(value).expanduser()
+                object.__setattr__(
+                    self,
+                    name,
+                    path.absolute() if name == "esmfold2_python" else path.resolve(),
+                )
         object.__setattr__(
             self,
             "design_checkpoints",
@@ -694,12 +699,16 @@ def _dependencies(graph: tuple[str, ...], stage: str) -> tuple[str, ...]:
     return ("analysis",)
 
 
-def _local_path(value: Path | str | None, label: str) -> Path:
+def _local_path(
+    value: Path | str | None, label: str, *, preserve_symlink: bool = False
+) -> Path:
     if value is None or str(value).startswith(("huggingface:", "http:", "https:")):
         raise PipelineValidationError(
             f"{label}: supply an explicit local file; implicit downloads are disabled"
         )
-    path = Path(value).expanduser().resolve()
+    path = Path(value).expanduser().absolute()
+    if not preserve_symlink:
+        path = path.resolve()
     if not path.is_file():
         raise PipelineValidationError(
             f"{label}: missing local file {path}; no download or fallback is attempted"
@@ -713,7 +722,11 @@ def _esm_assets(request: PipelineRequest) -> dict[str, Path]:
     from boltzgen.task.esmfold2.contract import ESMC_REPO, MODEL_REPO
     from boltzgen.task.esmfold2.runtime import worker_probe_command
 
-    python = _local_path(request.esmfold2_python, "esmfold2_scoring.esmfold2_python")
+    python = _local_path(
+        request.esmfold2_python,
+        "esmfold2_scoring.esmfold2_python",
+        preserve_symlink=True,
+    )
     _device(request, available=True)
     try:
         ccd = Path(
@@ -756,9 +769,14 @@ def _esm_assets(request: PipelineRequest) -> dict[str, Path]:
             text=True,
         )
     except (OSError, subprocess.CalledProcessError) as exc:
+        detail = (
+            (exc.stderr or "")
+            if isinstance(exc, subprocess.CalledProcessError)
+            else str(exc)
+        )
         raise PipelineValidationError(
             "esmfold2_scoring: the isolated ESMFold2 worker needs Python 3.12, "
-            f"esm=={ESM_VERSION}, and the selected device"
+            f"esm=={ESM_VERSION}, and the selected device: {detail[-800:]}"
         ) from exc
     return {
         "esmfold2_python": python,
