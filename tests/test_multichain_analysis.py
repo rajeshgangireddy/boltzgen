@@ -662,9 +662,10 @@ def test_sequence_logos_keep_chains_separate_and_choose_each_scaffold(
     original_cdr = filter_module.cdr_logo
     cdr_sequences = []
 
-    def record_cdr(sequences: list[str], title: str) -> Figure | None:
+    def record_cdr(sequences: list[str], title: str, output_dir: Path) -> Figure | None:
+        assert output_dir == task.outdir
         cdr_sequences.append(sequences)
-        return original_cdr(sequences, title)
+        return original_cdr(sequences, title, output_dir)
 
     monkeypatch.setattr(filter_module, "cdr_logo", record_cdr)
     monkeypatch.setattr(filter_module, "create_alignment_logo", record)
@@ -728,7 +729,8 @@ def test_logo_cohorts_preserve_sparse_rows_and_duplicate_indices(
     def logo(sequences: list[str], title: str) -> None:
         logos.append((sequences, title.split(maxsplit=1)[0]))
 
-    def cdr(sequences: list[str], _title: str) -> None:
+    def cdr(sequences: list[str], _title: str, output_dir: Path) -> None:
+        assert output_dir == task.outdir
         scaffolds.append(sequences)
 
     monkeypatch.setattr(filter_module, "create_alignment_logo", logo)

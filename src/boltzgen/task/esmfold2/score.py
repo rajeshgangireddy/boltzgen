@@ -213,12 +213,20 @@ class ESMFold2Score(Task):
         lm_dropout: float = 0.3,
         seed: int = 0,
         acceleration: str = "auto",
+        device_type: str | None = None,
+        device_index: int = 0,
     ):
         self.data = data
         self.design_dir = Path(design_dir)
         self.python = python
         self.reuse = reuse
         self.devices = int(devices)
+        if device_type is not None and device_type not in ("cpu", "cuda", "xpu"):
+            raise ValueError("ESMFold2 device_type must be cpu, cuda or xpu")
+        if device_index < 0 or (device_type is not None and self.devices != 1):
+            raise ValueError("An explicit ESMFold2 device requires one selected device")
+        self.device_type = device_type
+        self.device_index = device_index
         self.source_context_dir = (
             Path(source_context_dir) if source_context_dir else None
         )
@@ -283,7 +291,7 @@ class ESMFold2Score(Task):
         # Resolve first so an offline cache miss cannot replace valid prior
         # artifacts. Workers write into an isolated staging directory; publish a
         # design's request only after its complete result validates.
-        device_type = accelerator_type()
+        device_type = self.device_type or accelerator_type()
         if device_type not in ("cuda", "xpu", "cpu"):
             raise RuntimeError("ESMFold2 scoring requires a CUDA, XPU, or CPU device")
         runtime_kwargs = (
@@ -315,7 +323,9 @@ class ESMFold2Score(Task):
                     manifest.write_text(json.dumps(worker_requests))
                     workers.append(
                         subprocess.Popen(
-                            worker_command(python, manifest, f"{device_type}:{index}"),
+                            worker_command(
+                                python, manifest, f"{device_type}:{self.device_index + index}"
+                            ),
                         )
                     )
                 codes = [worker.wait() for worker in workers]

@@ -284,10 +284,14 @@ def test_invalid_exclusions_fail_before_loading_weights():
         SolubleMPNN("unused.pt", inverse_fold_restriction=["invalid"])
 
 
-def test_predictor_uses_device_aware_lightning_strategy(monkeypatch, tmp_path):
+@pytest.mark.parametrize("requested_accelerator", ["gpu", "cpu"])
+def test_predictor_uses_device_aware_lightning_strategy(
+    monkeypatch, tmp_path, requested_accelerator
+):
     from types import SimpleNamespace
 
     trainer_options = {}
+    resolver_options = {}
 
     class FakeTrainer:
         def __init__(self, **kwargs):
@@ -302,16 +306,16 @@ def test_predictor_uses_device_aware_lightning_strategy(monkeypatch, tmp_path):
         "SolubleMPNN",
         lambda *args, **kwargs: SimpleNamespace(eval=lambda: None),
     )
-    monkeypatch.setattr(
-        predict_solublempnn,
-        "resolve_trainer_kwargs",
-        lambda devices: ("xpu", "xpu_single"),
-        raising=False,
-    )
+
+    def resolve(devices, **kwargs):
+        resolver_options.update(kwargs)
+        return ("cpu", "auto") if kwargs else ("xpu", "xpu_single")
+
+    monkeypatch.setattr(predict_solublempnn, "resolve_trainer_kwargs", resolve)
     monkeypatch.setattr(
         predict_solublempnn,
         "xpu_precision_plugin",
-        lambda precision: None,
+        lambda precision, accelerator: None,
         raising=False,
     )
     monkeypatch.setattr(
@@ -323,14 +327,20 @@ def test_predictor_uses_device_aware_lightning_strategy(monkeypatch, tmp_path):
         checkpoint="unused.pt",
         output=str(tmp_path),
         name="test",
-        trainer={"accelerator": "gpu", "devices": 1, "precision": 32},
+        trainer={"accelerator": requested_accelerator, "devices": 1, "precision": 32},
         seed=17,
     )
 
     task.run()
 
-    assert trainer_options["accelerator"] == "xpu"
-    assert trainer_options["strategy"] == "xpu_single"
+    if requested_accelerator == "cpu":
+        assert resolver_options == {"requested_accelerator": "cpu"}
+        assert trainer_options["accelerator"] == "cpu"
+        assert trainer_options["strategy"] == "auto"
+    else:
+        assert resolver_options == {}
+        assert trainer_options["accelerator"] == "xpu"
+        assert trainer_options["strategy"] == "xpu_single"
 
 
 @pytest.mark.parametrize(

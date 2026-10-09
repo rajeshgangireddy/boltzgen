@@ -1,5 +1,6 @@
 """Automatically provision ESMFold2 without changing BoltzGen's environment."""
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -83,6 +84,16 @@ def resolve_python(
                 text=True,
             )
             if cached.returncode != 0:
+                if os.environ.get("UV_OFFLINE", "").upper() in {
+                    "1",
+                    "ON",
+                    "YES",
+                    "TRUE",
+                }:
+                    raise RuntimeError(
+                        "ESMFold2 runtime is not cached and UV_OFFLINE is set; "
+                        "pre-cache the runtime or supply --esmfold2_python."
+                    )
                 print(
                     "Preparing the ESMFold2 runtime: downloading Python and dependencies "
                     "as needed (about 6 GB on first use). This may take several minutes. "
@@ -96,7 +107,9 @@ def resolve_python(
                     text=True,
                 )
             python = cached.stdout.strip().splitlines()[-1]
-        print(f"Checking ESMFold2 dependencies and device using {python}...", flush=True)
+        print(
+            f"Checking ESMFold2 dependencies and device using {python}...", flush=True
+        )
         # Validate separately: import/CUDA failures in an existing environment
         # must surface directly, never be mistaken for an installer cache miss.
         result = subprocess.run(
@@ -126,4 +139,15 @@ def worker_command(python: str, manifest: Path, device: str) -> list[str]:
         str(manifest),
         "--device",
         device,
+    ]
+
+
+def worker_probe_command(python: str, device: str) -> list[str]:
+    return [
+        python,
+        "-I",
+        str(Path(__file__).with_name("worker.py")),
+        "--device",
+        device,
+        "--check-runtime",
     ]

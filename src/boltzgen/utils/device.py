@@ -68,9 +68,14 @@ def autocast_disabled():
     return torch.autocast(device_type=accelerator_type(), enabled=False)
 
 
-def xpu_precision_plugin(precision: Optional[str]) -> Optional[Any]:
+def xpu_precision_plugin(
+    precision: Optional[str], accelerator: Optional[str] = None
+) -> Optional[Any]:
     """Create Lightning AMP support for XPU precision modes."""
-    if accelerator_type() != "xpu" or precision not in {"bf16-mixed", "16-mixed"}:
+    if (accelerator or accelerator_type()) != "xpu" or precision not in {
+        "bf16-mixed",
+        "16-mixed",
+    }:
         return None
 
     from pytorch_lightning.plugins.precision import MixedPrecision
@@ -184,6 +189,7 @@ def resolve_trainer_kwargs(
     devices: Union[int, list],
     *,
     ddp_kwargs: Optional[dict] = None,
+    requested_accelerator: Optional[str] = None,
 ) -> tuple:
     """Pick the Lightning ``accelerator``/``strategy`` for the current hardware.
 
@@ -209,7 +215,15 @@ def resolve_trainer_kwargs(
     single XPU device is used even if more are requested.
     """
     num_devices = len(devices) if isinstance(devices, list) else devices
-    acc_type = accelerator_type()
+    acc_type = requested_accelerator or accelerator_type()
+    if requested_accelerator == "cpu":
+        return "cpu", "auto"
+    if requested_accelerator == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("The selected CUDA device is not available")
+    if requested_accelerator == "xpu" and not (
+        hasattr(torch, "xpu") and torch.xpu.is_available()
+    ):
+        raise RuntimeError("The selected XPU device is not available")
 
     if acc_type == "cuda":
         strategy: Union[str, Strategy] = "auto"
@@ -218,6 +232,12 @@ def resolve_trainer_kwargs(
         return "cuda", strategy
 
     if acc_type == "xpu":
+        if isinstance(devices, list) and devices != [0]:
+            from pytorch_lightning.strategies import StrategyRegistry
+
+            return "xpu", StrategyRegistry.get(
+                "xpu_single", device=f"xpu:{devices[0]}"
+            )
         return "xpu", "xpu_single"
 
     return "auto", "auto"

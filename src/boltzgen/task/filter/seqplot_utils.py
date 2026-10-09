@@ -170,9 +170,11 @@ def align_peptide_sequences(sequences):
     return aligned_seqs, alignment_scores
 
 
-def create_temp_fasta(sequences, names):
+def create_temp_fasta(sequences, names, output_dir):
     """Create a temporary FASTA file from sequences."""
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".fasta", delete=False) as f:
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".fasta", delete=False, dir=output_dir
+    ) as f:
         for i, (seq, name) in enumerate(zip(sequences, names)):
             f.write(f">{name}\n{seq}\n")
         return f.name
@@ -272,7 +274,7 @@ def draw_logo(counts, title, width=10):
     return fig
 
 
-def cdr_logo(sequences, name):
+def cdr_logo(sequences, name, output_dir):
     try:
         from abnumber import Chain
     except ImportError:
@@ -285,7 +287,7 @@ def cdr_logo(sequences, name):
 
     # Create temporary FASTA
     names = [f"seq_{i + 1}" for i in range(len(sequences))]
-    temp_fasta = create_temp_fasta(sequences, names)
+    temp_fasta = create_temp_fasta(sequences, names, output_dir)
 
     # Load chains using AbNumber
     chains = []

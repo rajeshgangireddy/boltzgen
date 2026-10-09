@@ -239,7 +239,9 @@ class Analyze(Task):
         if not all_task_ids:
             return sample_ids
         stalled_pools = 0
-        with TemporaryDirectory(prefix="boltzgen-analysis-") as state_dir, tqdm(
+        with TemporaryDirectory(
+            prefix=".boltzgen-analysis-", dir=self.design_dir
+        ) as state_dir, tqdm(
             total=num, desc="Processing samples"
         ) as pbar:
             state_path = Path(state_dir) / "analysis.pkl"

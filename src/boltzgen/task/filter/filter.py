@@ -650,7 +650,11 @@ class Filter(Task):
         )
 
         self.df["final_rank"] = np.arange(1, len(self.df) + 1)
-        self.df["quality_score"] = 1 - (self.df["final_rank"] - 1) / (len(self.df) - 1)
+        self.df["quality_score"] = (
+            1 - (self.df["final_rank"] - 1) / (len(self.df) - 1)
+            if len(self.df) > 1
+            else 1.0
+        )
 
         # Reorder columns
         priority_col_candidates = [
@@ -1430,7 +1434,7 @@ class Filter(Task):
                         full_sequences = [
                             seq for full, _ in views if (seq := full.get(chain_id))
                         ]
-                        show(cdr_logo(full_sequences, title))
+                        show(cdr_logo(full_sequences, title, self.outdir))
 
         section_page(
             "Scatter Plots – Metric relationships",

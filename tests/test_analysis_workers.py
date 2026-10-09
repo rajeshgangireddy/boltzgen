@@ -49,7 +49,7 @@ def isolate_snapshot_files(
 ) -> Iterator[None]:
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
     yield
-    assert not list(tmp_path.glob("boltzgen-analysis-*"))
+    assert not list(tmp_path.glob(".boltzgen-analysis-*"))
 
 
 @dataclass
@@ -116,6 +116,7 @@ class _TransportAnalyze(Analyze):
 def _transport(tmp_path: Path, count: int = 8) -> _TransportAnalyze:
     Chem.SetDefaultPickleProperties(Chem.PropertyPickleOptions.AllProps)
     analyzer = object.__new__(_TransportAnalyze)
+    analyzer.design_dir = tmp_path
     analyzer.data = SimpleNamespace(
         predict_set=_CountedDataset(
             [tmp_path / f"sample_{i}.cif" for i in range(count)]

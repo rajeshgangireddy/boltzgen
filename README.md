@@ -114,7 +114,120 @@ docker build --build-arg BACKEND=cuda --build-arg DOWNLOAD_WEIGHTS=true -t boltz
 </details>
 <br>
 
-> The rest of this README (below) is unchanged from the original BoltzGen README.
+## Python API (offline)
+
+`boltzgen.api` runs the built-in Hydra tasks in process. Supply local weights and
+the molecule archive; it never downloads weights or selects a fallback device.
+Polymer protocols also need a Python 3.12 ESMFold2 environment with `esm==3.4.1.post1`
+and the pinned ESMFold2, ESMC-6B, and CCD files already in the Hugging Face cache.
+
+```python
+from pathlib import Path
+from boltzgen.api import BoltzGenEngine, PipelineRequest
+
+request = PipelineRequest(
+    design_spec=Path("example/vanilla_protein/1g13prot.yaml"),
+    output_dir=Path("workbench/api_run"),
+    protocol="protein-anything",
+    num_designs=10,
+    budget=2,
+    device="cuda:0",  # or cpu, xpu, xpu:1, cuda:1
+    precision="bf16-mixed",
+    seed=42,
+    design_checkpoints=(Path("weights/diverse.ckpt"), Path("weights/adherence.ckpt")),
+    folding_checkpoint=Path("weights/boltz2_conf.ckpt"),
+    solublempnn_checkpoint=Path("weights/solublempnn.pt"),
+    moldir=Path("weights/mols.zip"),
+    esmfold2_python=Path("esm-runtime/bin/python"),
+)
+with BoltzGenEngine() as engine:
+    plan = engine.plan(request)
+    partial = engine.run(plan, through="analysis")
+    result = engine.run(plan, resume_from=partial)
+
+assert result.completed
+print(result.final_csv)
+for design in result.selected:
+    print(design.id, design.cif, design.esmfold2_cif)
+```
+
+For `protein-small_molecule`, use a ligand-containing native spec and set
+`boltzif_checkpoint` and `affinity_checkpoint`; ESMFold2 is not used.
+`inverse_fold_model="boltzif"` selects BoltzIF for other protocols.
+The other inverse-fold checkpoint key is `solublempnn_checkpoint`.
+`only_inverse_fold=True` starts at inverse folding with a fully specified
+backbone; `skip_inverse_folding=True` omits it. They cannot be combined.
+
+Stages run in order: `design` → `inverse_folding` → `folding` →
+`design_folding` (protein-anything and protein-small_molecule only) →
+`esmfold2_scoring` (polymer) **or** `affinity` (small molecule) →
+`analysis` → `filtering`. Protein, peptide, nanobody, and antibody
+interaction scores use `esmfold2_ipsae_min`; redesign uses
+`esmfold2_score` plus `esmfold2_score_metric`; small-molecule scores use
+`affinity_probability_binary1`. The native protocol recipes still apply
+their own CDR, peptide, redesign, liability, and filtering defaults.
+
+`PipelineRun.stages` contains ordered `StageResult`s (`name`, `status`,
+`files`, `elapsed_seconds`, `device`, `design_ids`). Each file has `name`
+(run-relative), `path` (absolute), `sha256`, and optional `source_id` and
+`source_run`. A completed run provides `output_dir`, `resume_handle`,
+`final_csv`, and `selected` designs. Filtering outputs are versioned under
+`filter_runs/v0001/final_ranked_designs/`, then `v0002/`, and so on.
+Use `result.final_csv` rather than constructing a fixed path; its filename
+is `final_designs_metrics_<budget>.csv`. A completed run's `resume_handle`
+points to its immutable `filter_runs/vXXXX/pipeline-manifest.json` snapshot;
+`output_dir/pipeline-manifest.json` tracks the latest state. Git installations
+record their commit in the manifest; all installations record a package hash.
+Earlier CSVs, CIFs, and snapshots remain intact after refiltering. `SelectedDesign.cif`
+is the final Boltz2 refold; `before_refolding_cif` is its original candidate.
+`esmfold2_cif` and `esmfold2_json` describe the separate ESM-selected
+structure, never the final refold. For ligand selections, `affinity_npz` points
+to the paired `affinity_out_npz` archive; it is `None` for polymers. Ligand
+affinity scores are checked against these archives, including after merge.
+Both scores describe
+the candidate's scoring run, not a new measurement of the exported Boltz2
+refold. A partial run has no final CSV or selected designs.
+
+`plan()` validates the protocol, options, single device, and native YAML
+file references and fingerprints the inputs; the full native scientific
+spec is parsed before the first executing stage. `run()` checks all required
+local assets before loading weights, including an isolated ESM worker runtime
+probe. It sets `HF_HUB_OFFLINE`,
+`TRANSFORMERS_OFFLINE`, and `UV_OFFLINE` for the run and its isolated ESM
+worker, and restores the caller's environment, random state, and Torch
+settings afterward. The `precision` setting applies to Lightning tasks;
+the pinned ESM worker uses its own model dtype. CPU `16-mixed` and
+multi-device requests are rejected.
+
+To resume, pass the same run's `PipelineRun`, directory, or manifest to
+`resume_from`. Receipts verify input, implementation, checkpoint, and stage
+file hashes; changed non-filtering settings require an explicit `stages=(...)`
+rerun, which invalidates later stages **before any filtering revision exists**.
+Once results have been selected, rerun upstream stages in a new output
+directory so earlier score and structure references remain valid.
+Filtering-only changes (for example `budget` or `alpha`) can be rerun with
+`engine.run(engine.plan(updated_request), stages=("filtering",), resume_from=result)`.
+Resume from the latest filtering snapshot (or the run directory); older
+snapshots are preserved for provenance but cannot branch a run.
+To combine independent analyzed runs, use
+`merged = engine.merge(merged_request, runs=(run_a, run_b))`, then run its
+`filtering` stage with `resume_from=merged`. Source inputs, device, scoring,
+and analysis settings must be compatible; nested merges are not supported.
+The merged filtering `budget` may exceed each source's `num_designs` when the
+combined pool is large enough; `num_designs` applies to generating new designs.
+For a later refilter, recreate the merged request with its original pinned
+`design_spec` and settings, update filtering fields, and resume from the latest
+manifest. `design_spec=None` is not supported for merge or refilter.
+Failures raise `PipelineStageError` with `.protocol`, `.stage`, `.cause`,
+and a failed `.result`, not a success-shaped run.
+
+`step_options` accepts reviewed stage keys only, such as
+`{"design": {"sampling_steps": 300}, "filtering": {"filter_cysteine": True}}`.
+Arbitrary Hydra `_target_`, checkpoint, or device overrides are rejected.
+Use `analysis_processes` and the typed filtering fields on `PipelineRequest`
+for those settings; no raw CLI arguments are accepted.
+
+> The CLI guide below retains its independent download and reuse behavior.
 
 # Running BoltzGen
 ![alt text](assets/fig1.png)

@@ -312,9 +312,19 @@ class PredictSolubleMPNN(Task):
             trainer_args["devices"] = list(devices)[:num_samples]
         elif isinstance(devices, int) and devices > num_samples:
             trainer_args["devices"] = num_samples
-        accelerator, strategy = resolve_trainer_kwargs(trainer_args["devices"])
+        requested = trainer_args.get("accelerator")
+        resolver_kwargs = (
+            {"requested_accelerator": requested}
+            if requested in {"cpu", "cuda", "xpu"}
+            else {}
+        )
+        accelerator, strategy = resolve_trainer_kwargs(
+            trainer_args["devices"], **resolver_kwargs
+        )
         trainer_args["accelerator"] = accelerator
-        precision_plugin = xpu_precision_plugin(trainer_args.get("precision"))
+        precision_plugin = xpu_precision_plugin(
+            trainer_args.get("precision"), accelerator
+        )
         if precision_plugin is not None:
             trainer_args.pop("precision")
             trainer_args["plugins"] = precision_plugin

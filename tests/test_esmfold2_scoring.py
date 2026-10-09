@@ -131,6 +131,94 @@ def test_runtime_rejects_conflicting_device_backends():
         resolve_python(require_cpu=True, require_xpu=True)
 
 
+def test_uv_offline_does_not_retry_uncached_runtime_online(monkeypatch):
+    import subprocess
+
+    from boltzgen.task.esmfold2 import runtime
+
+    monkeypatch.setenv("UV_OFFLINE", "1")
+    commands = []
+
+    def probe(command, **kwargs):
+        commands.append(command)
+        if "--offline" not in command:
+            pytest.fail("UV_OFFLINE must not retry runtime discovery online")
+        return subprocess.CompletedProcess(command, 1, "", "uncached runtime")
+
+    monkeypatch.setattr(runtime.subprocess, "run", probe)
+    with pytest.raises(RuntimeError, match="UV_OFFLINE"):
+        runtime.resolve_python(require_cpu=True)
+    assert len(commands) == 1
+
+
+@pytest.mark.parametrize(("hub_offline", "local_only"), [("1", True), ("0", False)])
+def test_worker_hub_lookups_follow_offline_setting_after_hub_import(
+    monkeypatch, tmp_path, hub_offline, local_only
+):
+    import os
+    import sys
+    import types
+
+    import huggingface_hub
+    from huggingface_hub import constants
+    import torch
+
+    from boltzgen.task.esmfold2 import worker
+    from boltzgen.task.esmfold2.contract import ESMC_REPO, MODEL_REPO
+
+    monkeypatch.setattr(constants, "HF_HUB_OFFLINE", False)
+    monkeypatch.setenv("HF_HUB_OFFLINE", hub_offline)
+    monkeypatch.setenv("UV_OFFLINE", "1")
+    monkeypatch.setenv("ESMCFOLD_CCD_PATH", "previous path")
+    calls = []
+
+    def download_ccd(repo, filename, **kwargs):
+        calls.append((repo, kwargs.get("local_files_only")))
+        assert filename == "ccd.pkl"
+        return str(tmp_path / "ccd.pkl")
+
+    def download_model(repo, **kwargs):
+        calls.append((repo, kwargs.get("local_files_only")))
+        return str(tmp_path / repo.split("/")[-1])
+
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", download_ccd)
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", download_model)
+    worker.configure_ccd()
+    assert os.environ["ESMCFOLD_CCD_PATH"] == str(tmp_path / "ccd.pkl")
+    manifest = tmp_path / "requests.json"
+    manifest.write_text("[]")
+    monkeypatch.setattr(worker, "validate_device", lambda _: torch.device("cpu"))
+    monkeypatch.setattr(worker, "version", lambda _: ESM_VERSION)
+    monkeypatch.setattr(sys, "argv", ["worker.py", str(manifest), "--device", "cpu"])
+    esm = types.ModuleType("esm")
+    esm.__path__ = []
+    models = types.ModuleType("esm.models")
+    models.__path__ = []
+    fold = types.ModuleType("esm.models.esmfold2")
+
+    class StopBeforeWeights:
+        @staticmethod
+        def from_pretrained(*args, **kwargs):
+            raise RuntimeError("stopped before weights")
+
+    fold.ESMFold2InputBuilder = object
+    fold.EsmFold2Model = StopBeforeWeights
+    for name, module in (
+        ("esm", esm),
+        ("esm.models", models),
+        ("esm.models.esmfold2", fold),
+    ):
+        monkeypatch.setitem(sys.modules, name, module)
+    with pytest.raises(RuntimeError, match="stopped before weights"):
+        worker.main()
+    assert calls == [
+        (MODEL_REPO, local_only),
+        (MODEL_REPO, local_only),
+        (MODEL_REPO, local_only),
+        (ESMC_REPO, local_only),
+    ]
+
+
 def test_ipsae_directionality_cutoff_and_nucleic_acid_normalization():
     pae = np.full((5, 5), 20.0)
     pae[:2, 2:] = [[1, 1, 10], [20, 20, 20]]

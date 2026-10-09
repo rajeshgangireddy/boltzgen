@@ -3,6 +3,7 @@
 import argparse
 from contextlib import contextmanager
 from dataclasses import replace
+from importlib import import_module
 from importlib.metadata import version
 import json
 import os
@@ -73,12 +74,19 @@ def seed_device_rng(seed: int, device: torch.device) -> None:
         torch.xpu.manual_seed_all(seed)
 
 
+def _hub_offline() -> bool:
+    return os.environ.get("HF_HUB_OFFLINE", "").upper() in {"1", "ON", "YES", "TRUE"}
+
+
 def configure_ccd() -> None:
     """Resolve the pinned CCD before importing ESM, which snapshots the path."""
     from huggingface_hub import hf_hub_download
 
     os.environ["ESMCFOLD_CCD_PATH"] = hf_hub_download(
-        MODEL_REPO, "ccd.pkl", revision=MODEL_REVISION
+        MODEL_REPO,
+        "ccd.pkl",
+        revision=MODEL_REVISION,
+        local_files_only=_hub_offline(),
     )
 
 
@@ -477,9 +485,22 @@ def run_request(model, builder, request: dict, output: Path, device: str) -> Non
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("manifest", type=Path)
+    parser.add_argument("manifest", type=Path, nargs="?")
     parser.add_argument("--device", default="cuda:0")
+    parser.add_argument("--check-runtime", action="store_true")
     args = parser.parse_args()
+    if args.check_runtime:
+        if sys.version_info < (3, 12) or version("esm") != ESM_VERSION:
+            raise RuntimeError(f"ESMFold2 requires Python 3.12 and esm=={ESM_VERSION}")
+        getattr(import_module("esm.models.esmfold2"), "EsmFold2Model")
+
+        device = validate_device(args.device)
+        torch.empty(1, device=device).add_(1)
+        if device.type in ("cuda", "xpu"):
+            getattr(torch, device.type).synchronize()
+        return
+    if args.manifest is None:
+        parser.error("a manifest is required for scoring")
     paths = json.loads(args.manifest.read_text())
     requests = [json.loads(Path(path).read_text()) for path in paths]
     device = validate_device(args.device)
@@ -516,12 +537,18 @@ def main() -> None:
 
     print("Checking/downloading ESMFold2 2021 checkpoint...", flush=True)
     model_path = snapshot_download(
-        MODEL_REPO, revision=MODEL_REVISION, allow_patterns=["*.json", "*.safetensors"]
+        MODEL_REPO,
+        revision=MODEL_REVISION,
+        allow_patterns=["*.json", "*.safetensors"],
+        local_files_only=_hub_offline(),
     )
     print(f"ESMFold2 checkpoint ready: {model_path}", flush=True)
     print("Checking/downloading ESMC-6B checkpoint...", flush=True)
     esmc_path = snapshot_download(
-        ESMC_REPO, revision=ESMC_REVISION, allow_patterns=["*.json", "*.safetensors"]
+        ESMC_REPO,
+        revision=ESMC_REVISION,
+        allow_patterns=["*.json", "*.safetensors"],
+        local_files_only=_hub_offline(),
     )
     print(f"ESMC-6B checkpoint ready: {esmc_path}", flush=True)
     print(

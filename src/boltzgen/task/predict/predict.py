@@ -175,9 +175,17 @@ class Predict(Task):
             if isinstance(devices, (list, listconfig.ListConfig))
             else devices
         )
-        accelerator, strategy = resolve_trainer_kwargs(devices)
+        requested = self.trainer.get("accelerator")
+        resolver_kwargs = (
+            {"requested_accelerator": requested}
+            if requested in {"cpu", "cuda", "xpu"}
+            else {}
+        )
+        accelerator, strategy = resolve_trainer_kwargs(devices, **resolver_kwargs)
         self.trainer["accelerator"] = accelerator
-        precision_plugin = xpu_precision_plugin(self.trainer.get("precision"))
+        precision_plugin = xpu_precision_plugin(
+            self.trainer.get("precision"), accelerator
+        )
         if precision_plugin is not None:
             self.trainer.pop("precision")
             self.trainer["plugins"] = precision_plugin
@@ -246,7 +254,9 @@ class Predict(Task):
                     devices=devices,
                 ):
                     self.lightning_trainer.predict(
-                        self.model_module, datamodule=self.data, return_predictions=False
+                        self.model_module,
+                        datamodule=self.data,
+                        return_predictions=False,
                     )
             flush_rollup()
             del self.model_module

@@ -23,7 +23,17 @@ from boltzgen.task.esmfold2.contract import (
     fingerprint,
 )
 from boltzgen.task.filter.filter import Filter
+from boltzgen.task.filter.seqplot_utils import create_temp_fasta
 from boltzgen.task.predict.writer import AffinityWriter
+
+
+def test_cdr_fasta_stays_in_filter_output(tmp_path: Path) -> None:
+    path = Path(create_temp_fasta(["AC"], ["candidate"], tmp_path))
+    try:
+        assert path.parent == tmp_path
+        assert path.read_text() == ">candidate\nAC\n"
+    finally:
+        path.unlink()
 
 
 def _load_filter(
@@ -144,6 +154,14 @@ def test_independent_rules_count_and_rank_csv(
     assert task.df["id"].tolist() == [f"design_{i}" for i in expected_order]
     assert task.df["final_rank"].tolist() == list(range(1, len(frame) + 1))
     assert task.df.columns.is_unique
+
+
+def test_one_remaining_design_keeps_finite_quality_score(tmp_path: Path) -> None:
+    task = _load_filter(tmp_path, pd.DataFrame({"quality": [0.7]}), [])
+    task.filter_df()
+    task.sort_df()
+    assert task.df["final_rank"].tolist() == [1]
+    assert task.df["quality_score"].tolist() == [1.0]
 
 
 @pytest.mark.parametrize(
