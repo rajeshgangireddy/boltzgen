@@ -425,10 +425,10 @@ class Analyze(Task):
                 df = self.run_foldseek_clustering(df)
         # Write individual metrics to disk
         csv_path = Path(self.design_dir) / f"aggregate_metrics_{self.name}.csv"
-        # Polymer score provenance is checked at full precision by filtering.
+        # Preserve model scores for provenance checks.
         df.to_csv(
             csv_path,
-            float_format="%.17g" if self.esmfold2_metrics else "%.5f",
+            float_format="%.17g",
             index=False,
         )
 

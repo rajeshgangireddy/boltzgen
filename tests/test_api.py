@@ -953,6 +953,45 @@ def test_ligand_analysis_rejects_stale_affinity_score(
     assert error.value.stage == "analysis"
 
 
+def test_ligand_analysis_preserves_affinity_score_precision(tmp_path: Path) -> None:
+    from boltzgen.task.analyze.analyze import Analyze
+
+    score = np.float32(0.7515725493431091)
+    metrics_dir = tmp_path / "metrics"
+    metrics_dir.mkdir()
+    np.savez(
+        metrics_dir / "metrics_brilacidin_0.npz",
+        id="brilacidin_0",
+        file_name="brilacidin_0.cif",
+        affinity_probability_binary1=score,
+    )
+    np.savez(
+        metrics_dir / "data_brilacidin_0.npz",
+        sample_id="brilacidin_0",
+        target_id="brilacidin",
+        sequence="G",
+        design_seq=np.array([], dtype=int),
+        ca_coords=np.zeros((1, 3)),
+    )
+    analyzer = object.__new__(Analyze)
+    analyzer.metrics_dir = metrics_dir
+    analyzer.design_dir = tmp_path
+    analyzer.name = "analyze"
+    analyzer.esmfold2_metrics = False
+    analyzer.run_clustering = False
+    analyzer.wandb = None
+    analyzer.compute_diversity = lambda *args: ({}, {})
+    analyzer.compute_novelty = lambda: ({}, {})
+    analyzer.make_histograms = lambda *args: ({}, {})
+
+    analyzer.aggregate_metrics()
+
+    table = pd.read_csv(tmp_path / "aggregate_metrics_analyze.csv")
+    assert float(table.loc[0, "affinity_probability_binary1"]) == pytest.approx(
+        float(score), rel=0, abs=1e-12
+    )
+
+
 def test_ligand_merge_preserves_affinity_score_evidence(
     inputs: dict, monkeypatch: pytest.MonkeyPatch
 ) -> None:
