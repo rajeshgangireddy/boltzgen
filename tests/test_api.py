@@ -1190,6 +1190,21 @@ def test_esm_preflight_uses_only_the_offline_worker(
     assert calls[0][:2] == [str(request.esmfold2_python), "-I"]
     assert Path(calls[0][2]).name == "worker.py"
     assert calls[0][-3:] == ["--device", "cpu", "--check-runtime"]
+    original_device = api._device
+
+    def selected_device(
+        chosen: PipelineRequest, *, available: bool = False
+    ) -> tuple[str, int]:
+        return (
+            ("xpu", 0)
+            if chosen.device == "xpu"
+            else original_device(chosen, available=available)
+        )
+
+    monkeypatch.setattr(api, "_device", selected_device)
+    with api._run_state(request):
+        api._esm_assets(replace(request, device="xpu"))
+    assert calls[1][-3:] == ["--device", "xpu:0", "--check-runtime"]
 
 
 def test_stage_selection_checks_dependencies_and_failed_state(

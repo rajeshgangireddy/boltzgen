@@ -727,7 +727,8 @@ def _esm_assets(request: PipelineRequest) -> dict[str, Path]:
         "esmfold2_scoring.esmfold2_python",
         preserve_symlink=True,
     )
-    _device(request, available=True)
+    backend, index = _device(request, available=True)
+    worker_device = "cpu" if backend == "cpu" else f"{backend}:{index}"
     try:
         ccd = Path(
             hf_hub_download(
@@ -763,7 +764,7 @@ def _esm_assets(request: PipelineRequest) -> dict[str, Path]:
         )
     try:
         subprocess.run(
-            worker_probe_command(str(python), request.device),
+            worker_probe_command(str(python), worker_device),
             check=True,
             capture_output=True,
             text=True,
