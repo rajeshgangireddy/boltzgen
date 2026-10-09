@@ -565,6 +565,7 @@ def _check_request(request: PipelineRequest, graph: tuple[str, ...]) -> None:
 
 def _spec_inputs(path: Path) -> dict[str, str]:
     files: dict[str, str] = {}
+    root = path.expanduser().resolve()
 
     def record(file: Path) -> None:
         file = file.expanduser().resolve()
@@ -576,6 +577,12 @@ def _spec_inputs(path: Path) -> dict[str, str]:
         if file.suffix != ".yaml":
             return
         data = yaml.safe_load(file.read_text())
+        if file == root and (
+            not isinstance(data, dict) or not isinstance(data.get("entities"), list)
+        ):
+            raise PipelineValidationError(
+                f"{file}: native design spec must declare an entities list; scaffold fragments are not standalone specs"
+            )
 
         def visit(value: Any) -> None:
             if isinstance(value, dict):

@@ -558,6 +558,19 @@ def test_quoted_design_spec_and_checkpoint_paths_keep_identity(inputs: dict) -> 
     ].checkpoint.path == str(checkpoint)
 
 
+def test_plan_rejects_scaffold_fragment_before_creating_run(inputs: dict) -> None:
+    scaffold = inputs["design_spec"].with_suffix(".cif")
+    scaffold.write_text("scaffold")
+    inputs["design_spec"].write_text(f"path: {scaffold.name}\ninclude: []\n")
+    request = PipelineRequest(**inputs)
+
+    with BoltzGenEngine() as engine, pytest.raises(
+        PipelineValidationError, match="native design spec.*entities"
+    ):
+        engine.plan(request)
+    assert not request.output_dir.exists()
+
+
 def test_partial_resume_filter_only_and_stale_artifact(
     inputs: dict, monkeypatch: pytest.MonkeyPatch
 ) -> None:
