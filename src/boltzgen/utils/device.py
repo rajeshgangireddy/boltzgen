@@ -18,9 +18,14 @@ Only CUDA and XPU are actively supported; everything else falls back to CPU.
 
 from __future__ import annotations
 
+import os
+import random
 from typing import Any, Optional, Union
 
+import numpy as np
 import torch
+from omegaconf import ListConfig
+from pytorch_lightning import seed_everything
 from pytorch_lightning.strategies import DDPStrategy, SingleDeviceStrategy, Strategy
 
 
@@ -185,8 +190,30 @@ def _register_xpu_lightning_support() -> None:
 _register_xpu_lightning_support()
 
 
+def seed_everything_for_device(
+    seed: int, *, requested_accelerator: Optional[str] = None, workers: bool = True
+) -> None:
+    """Seed the selected backend without scheduling unused accelerators on CPU."""
+    backend = (
+        requested_accelerator
+        if requested_accelerator in ("cpu", "cuda", "xpu")
+        else accelerator_type()
+    )
+    if backend in ("cuda", "xpu"):
+        seed_everything(seed, workers=workers)
+        return
+    seed = int(seed)
+    if not 0 <= seed < 2**32:
+        raise ValueError("seed must be an unsigned 32-bit integer")
+    os.environ["PL_GLOBAL_SEED"] = str(seed)
+    random.seed(seed)
+    np.random.seed(seed)  # noqa: NPY002 -- match Lightning's legacy NumPy RNG
+    torch.default_generator.manual_seed(seed)
+    os.environ["PL_SEED_WORKERS"] = str(int(workers))
+
+
 def resolve_trainer_kwargs(
-    devices: Union[int, list],
+    devices: Union[int, list, ListConfig],
     *,
     ddp_kwargs: Optional[dict] = None,
     requested_accelerator: Optional[str] = None,
@@ -196,8 +223,8 @@ def resolve_trainer_kwargs(
     Parameters
     ----------
     devices:
-        Number of devices (int) or explicit device list, as passed to
-        ``pl.Trainer(devices=...)``.
+        Number of devices (int) or explicit device list (including Hydra's
+        ``ListConfig``), as passed to ``pl.Trainer(devices=...)``.
     ddp_kwargs:
         Extra kwargs forwarded to ``DDPStrategy`` when multi-device CUDA
         training is requested (e.g. ``find_unused_parameters``, ``timeout``).
@@ -214,6 +241,8 @@ def resolve_trainer_kwargs(
     Multi-device XPU (distributed) training is not yet supported; only a
     single XPU device is used even if more are requested.
     """
+    if isinstance(devices, ListConfig):
+        devices = list(devices)
     num_devices = len(devices) if isinstance(devices, list) else devices
     acc_type = requested_accelerator or accelerator_type()
     if requested_accelerator == "cpu":
@@ -235,9 +264,7 @@ def resolve_trainer_kwargs(
         if isinstance(devices, list) and devices != [0]:
             from pytorch_lightning.strategies import StrategyRegistry
 
-            return "xpu", StrategyRegistry.get(
-                "xpu_single", device=f"xpu:{devices[0]}"
-            )
+            return "xpu", StrategyRegistry.get("xpu_single", device=f"xpu:{devices[0]}")
         return "xpu", "xpu_single"
 
     return "auto", "auto"

@@ -196,7 +196,9 @@ local assets before loading weights, including an isolated ESM worker runtime
 probe. It sets `HF_HUB_OFFLINE`,
 `TRANSFORMERS_OFFLINE`, and `UV_OFFLINE` for the run and its isolated ESM
 worker, and restores the caller's environment, random state, and Torch
-settings afterward. The `precision` setting applies to Lightning tasks;
+settings afterward. CPU prediction seeds the CPU generator and Lightning
+workers without queuing seeds for unused accelerators. The `precision` setting
+applies to Lightning tasks;
 the pinned ESM worker uses its own model dtype. CPU `16-mixed` and
 multi-device requests are rejected.
 
@@ -214,6 +216,12 @@ To combine independent analyzed runs, use
 `merged = engine.merge(merged_request, runs=(run_a, run_b))`, then run its
 `filtering` stage with `resume_from=merged`. Source inputs, device, scoring,
 and analysis settings must be compatible; nested merges are not supported.
+Merge prepares copied files and their receipt before publishing the destination;
+if copying or recording fails, an initially empty destination stays empty (or
+absent) and can be retried. Nonempty destinations are rejected untouched.
+Merged stage file receipts include copied backbone, native, and refold companions,
+and ranked `before_refolding` files retain their source design identity.
+Filtering-only resume can run on a CPU-only host even if the source used CUDA.
 The merged filtering `budget` may exceed each source's `num_designs` when the
 combined pool is large enough; `num_designs` applies to generating new designs.
 For a later refilter, recreate the merged request with its original pinned

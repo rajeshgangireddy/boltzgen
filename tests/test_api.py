@@ -4,16 +4,20 @@ from __future__ import annotations
 
 import json
 import os
+import pickle
 import random
 import subprocess
 import sys
 from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
+from types import SimpleNamespace
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
 import pytest
 import torch
+from rdkit import Chem
 
 import boltzgen.api as api
 from boltzgen.api import (
@@ -27,6 +31,7 @@ from boltzgen.api import (
     PipelineValidationError,
     StageResult,
 )
+from boltzgen.data import const
 from boltzgen.task.esmfold2.contract import (
     ESMC_REVISION,
     ESM_VERSION,
@@ -37,6 +42,9 @@ from boltzgen.task.esmfold2.contract import (
     SCORE_KEY,
     fingerprint,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 PROTOCOLS = (
     "protein-anything",
@@ -503,6 +511,26 @@ def test_rejects_ambiguous_typed_options_and_hydra_path_interpolation(
                 engine.plan(PipelineRequest(**{**inputs, **overrides}))
 
 
+@pytest.mark.parametrize(
+    ("field", "expression"),
+    [
+        ("additional_filters", "invalid"),
+        ("additional_filters", "score>invalid"),
+        ("size_buckets", "invalid"),
+        ("size_buckets", "1-2:invalid"),
+    ],
+)
+def test_invalid_filter_syntax_has_pipeline_error_and_parser_cause(
+    inputs: dict, field: str, expression: str
+) -> None:
+    with BoltzGenEngine() as engine, pytest.raises(
+        PipelineValidationError, match=field
+    ) as error:
+        engine.plan(PipelineRequest(**{**inputs, field: (expression,)}))
+
+    assert type(error.value.__cause__) is ValueError
+
+
 def test_explicit_selected_device_and_reviewed_step_options(inputs: dict) -> None:
     request = PipelineRequest(
         **inputs,
@@ -521,6 +549,61 @@ def test_explicit_selected_device_and_reviewed_step_options(inputs: dict) -> Non
     assert config["filtering"].peptide_type == "cyclic"
     assert config["folding"].trainer.accelerator == "cpu"
     assert config["folding"].trainer.devices == 1
+
+
+def test_filter_only_cuda_resume_does_not_query_cuda_capability(
+    inputs: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def unexpected_probe(_index: int) -> None:
+        pytest.fail("CPU-only filtering must not probe the CUDA device")
+
+    monkeypatch.setattr(torch.cuda, "get_device_capability", unexpected_probe)
+    request = PipelineRequest(**{**inputs, "device": "cuda:1"})
+    config = api._recipe(request, ("filtering",))  # noqa: SLF001
+
+    assert set(config) == {"filtering"}
+    assert config["filtering"].budget == request.budget
+
+
+def test_cuda_origin_resume_filters_on_cpu_only_host(
+    inputs: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    request = PipelineRequest(
+        **{**inputs, "device": "cuda:1", "protocol": "protein-small_molecule"}
+    )
+    _stub_real_work(monkeypatch, request, [])
+    queued_cuda_seeds: list = []
+    monkeypatch.setattr(
+        torch.cuda.random,
+        "_lazy_call",
+        lambda callback, **_kwargs: queued_cuda_seeds.append(callback),
+    )
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda _index: (8, 0))
+    with BoltzGenEngine() as engine:
+        analyzed = engine.run(engine.plan(request), through="analysis")
+        queued_cuda_seeds.clear()
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+
+        def unexpected_probe(_index: int) -> None:
+            pytest.fail("CUDA-origin filtering resumed on a CPU-only host")
+
+        monkeypatch.setattr(torch.cuda, "get_device_capability", unexpected_probe)
+        filtered = engine.run(
+            engine.plan(request),
+            stages=("filtering",),
+            resume_from=analyzed,
+        )
+        merged_request = replace(
+            request, output_dir=request.output_dir.parent / "cpu-merged"
+        )
+        merged = engine.merge(merged_request, runs=[analyzed])
+
+    assert filtered.completed
+    assert filtered.final_csv.is_file()
+    assert merged.stages[0].status == "merged"
+    assert queued_cuda_seeds == []
 
 
 def test_ligand_default_boltzif_accepts_inverse_folding_options(inputs: dict) -> None:
@@ -1194,6 +1277,65 @@ def test_cpu_run_does_not_seed_unused_accelerators(
     assert seeded == []
 
 
+def test_native_cpu_prediction_does_not_queue_seed_for_first_cuda_initialization(
+    inputs: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from boltzgen.task.predict import predict as native_predict  # noqa: PLC0415
+
+    request = PipelineRequest(protocol="protein-small_molecule", **inputs)
+    _stub_real_work(monkeypatch, request, [])
+    fake_stage = api.run_task
+    queued_cuda_seeds: list = []
+    monkeypatch.setattr(
+        torch.cuda.random,
+        "_lazy_call",
+        lambda callback, **_kwargs: queued_cuda_seeds.append(callback),
+    )
+    monkeypatch.setattr(
+        native_predict.Boltz,
+        "load_from_checkpoint",
+        lambda *_args, **_kwargs: SimpleNamespace(eval=lambda: None),
+    )
+    monkeypatch.setattr(native_predict, "Trainer", lambda **_kwargs: SimpleNamespace())
+
+    class PredictSet(list):
+        seed: int | None = None
+
+    def native_seed_then_write(config: object) -> None:
+        prediction = native_predict.Predict(
+            data=SimpleNamespace(predict_set=PredictSet([object()])),
+            writer=object(),
+            checkpoint="unused.ckpt",
+            output=str(request.output_dir),
+            name="prediction",
+            recycling_steps=1,
+            sampling_steps=1,
+            trainer={"accelerator": "cpu", "devices": 1},
+            seed=request.seed,
+        )
+        torch.rand(1)
+        prediction.run(run_prediction=False)
+        assert prediction.data.predict_set.seed == request.seed
+        assert torch.equal(
+            torch.rand(1),
+            torch.rand(1, generator=torch.Generator().manual_seed(request.seed)),
+        )
+        assert os.environ["PL_GLOBAL_SEED"] == str(request.seed)
+        assert os.environ["PL_SEED_WORKERS"] == "1"
+        fake_stage(config)
+
+    monkeypatch.setattr(api, "run_task", native_seed_then_write)
+    cpu_rng = torch.random.get_rng_state().clone()
+    cuda_initialized = torch.cuda.is_initialized()
+    with BoltzGenEngine() as engine:
+        run = engine.run(engine.plan(request), through="design")
+
+    assert run.stages[0].status == "completed"
+    assert queued_cuda_seeds == []
+    assert torch.cuda.is_initialized() == cuda_initialized
+    assert torch.equal(torch.random.get_rng_state(), cpu_rng)
+
+
 def test_esm_preflight_uses_only_the_offline_worker(
     inputs: dict, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1353,6 +1495,16 @@ def test_compatible_merge_preserves_source_identity(
         assert {item.source_run for item in filtered.selected} <= {
             run.output_dir for run in runs
         }
+        for item in filtered.selected:
+            before = next(
+                file
+                for file in filtered.stages[-1].files
+                if file.path == item.before_refolding_cif
+            )
+            assert (before.source_id, before.source_run) == (
+                item.source_id,
+                item.source_run,
+            )
         final = pd.read_csv(filtered.final_csv).set_index("id")
         for item in filtered.selected:
             assert item.affinity_npz is None
@@ -1392,6 +1544,139 @@ def test_compatible_merge_preserves_source_identity(
         )
         assert len(reranked.selected) == 4
         assert filtered.final_csv.is_file()
+
+
+def test_merge_receipts_cover_copied_companions_and_detect_tampering(
+    inputs: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = PipelineRequest(**inputs)
+    _stub_real_work(monkeypatch, source, [])
+    with BoltzGenEngine() as engine:
+        run = engine.run(engine.plan(source), through="analysis")
+        for directory in (
+            source.output_dir / "intermediate_designs",
+            _sample(source),
+        ):
+            (directory / "input_0_native.pdb").write_text("native pdb")
+        destination = replace(
+            source, output_dir=source.output_dir.parent / "merged-companions"
+        )
+        merged = engine.merge(destination, runs=[run])
+        expected = (
+            "intermediate_designs_inverse_folded/refold_design_cif/run_input_0.cif",
+            "intermediate_designs_inverse_folded/run_input_0_native.pdb",
+            "intermediate_designs/run_input_0_native.pdb",
+        )
+        files = {file.name: file for file in merged.stages[0].files}
+        for name in expected:
+            assert name in files
+            file = files[name]
+            assert file.source_id == "input_0"
+            assert file.source_run == source.output_dir
+            original = file.path.read_bytes()
+            file.path.write_bytes(b"tampered")
+            with pytest.raises(
+                PipelineResumeError, match="artifact changed or was swapped"
+            ):
+                engine.run(
+                    engine.plan(destination),
+                    stages=("filtering",),
+                    resume_from=merged,
+                )
+            file.path.write_bytes(original)
+        file = files[expected[-1]]
+        original = file.path.read_bytes()
+        file.path.unlink()
+        file.path.symlink_to(source.design_spec)
+        with pytest.raises(PipelineResumeError, match=r"Artifact escapes|Symlinked"):
+            engine.run(
+                engine.plan(destination),
+                stages=("filtering",),
+                resume_from=merged,
+            )
+        file.path.unlink()
+        file.path.write_bytes(original)
+
+
+def test_failed_merge_with_later_conflicting_source_can_retry_same_destination(
+    inputs: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs = []
+    molecule_paths = []
+    with BoltzGenEngine() as engine:
+        for index, smiles in enumerate(("CCO", "CCN")):
+            source = PipelineRequest(
+                **{
+                    **inputs,
+                    "protocol": "protein-small_molecule",
+                    "output_dir": inputs["output_dir"].parent / f"molecule-{index}",
+                }
+            )
+            _stub_real_work(monkeypatch, source, [])
+            fake_stage = api.run_task
+            molecule_path = _sample(source) / const.molecules_dirname / "LIG0.pkl"
+
+            def write_molecule(
+                config: object,
+                *,
+                source_stage: Callable[[object], None] = fake_stage,
+                saved_path: Path = molecule_path,
+                molecule: str = smiles,
+            ) -> None:
+                source_stage(config)
+                if os.environ["BOLTZGEN_PIPELINE_STEP"] == "inverse_folding":
+                    saved_path.parent.mkdir(parents=True, exist_ok=True)
+                    saved_path.write_bytes(pickle.dumps(Chem.MolFromSmiles(molecule)))
+
+            monkeypatch.setattr(api, "run_task", write_molecule)
+            runs.append(engine.run(engine.plan(source), through="analysis"))
+            molecule_paths.append(molecule_path)
+
+        destination = replace(
+            source, output_dir=inputs["output_dir"].parent / "merged-molecules"
+        )
+        destination.output_dir.mkdir()
+        source_snapshots = [
+            (run.resume_handle.read_bytes(), path.read_bytes())
+            for run, path in zip(runs, molecule_paths)
+        ]
+        with pytest.raises(
+            PipelineResumeError, match="Conflicting molecule definition"
+        ) as conflict:
+            engine.merge(destination, runs=runs)
+        assert type(conflict.value.__cause__) is ValueError
+
+        assert not any(destination.output_dir.iterdir())
+        assert not list(destination.output_dir.parent.glob(".boltzgen-merge-*"))
+        assert [
+            (run.resume_handle.read_bytes(), path.read_bytes())
+            for run, path in zip(runs, molecule_paths)
+        ] == source_snapshots
+        retry = engine.merge(destination, runs=runs[:1])
+        assert retry.stages[0].status == "merged"
+        assert retry.resume_handle.is_file()
+
+        receipt_failure = replace(
+            destination, output_dir=destination.output_dir.parent / "failed-receipt"
+        )
+
+        def fail_receipt(*_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("receipt could not be published")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(api, "_record_stage", fail_receipt)
+            with pytest.raises(RuntimeError, match="receipt could not be published"):
+                engine.merge(receipt_failure, runs=runs[:1])
+        assert not receipt_failure.output_dir.exists()
+        assert not list(destination.output_dir.parent.glob(".boltzgen-merge-*"))
+        assert engine.merge(receipt_failure, runs=runs[:1]).resume_handle.is_file()
+
+        owned = replace(destination, output_dir=destination.output_dir.parent / "owned")
+        owned.output_dir.mkdir()
+        (owned.output_dir / "keep.txt").write_text("user file")
+        with pytest.raises(PipelineResumeError, match="destination must be distinct"):
+            engine.merge(owned, runs=runs[:1])
+        assert (owned.output_dir / "keep.txt").read_text() == "user file"
 
 
 def test_merge_checks_source_compatibility_and_freezes_lineage(

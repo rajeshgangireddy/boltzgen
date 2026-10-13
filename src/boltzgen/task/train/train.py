@@ -201,12 +201,23 @@ class Training(Task):
                 pass
 
         # Set up trainer
+        devices = self.trainer.get("devices", devices)
+        if isinstance(devices, listconfig.ListConfig):
+            devices = list(devices)
+            self.trainer = {**self.trainer, "devices": devices}
+        requested = self.trainer.get("accelerator")
+        resolver_kwargs = (
+            {"requested_accelerator": requested}
+            if requested in {"cpu", "cuda", "xpu"}
+            else {}
+        )
         accelerator, strategy = resolve_trainer_kwargs(
             devices,
             ddp_kwargs={
                 "find_unused_parameters": self.find_unused_parameters,
                 "timeout": datetime.timedelta(seconds=self.ddp_timeout_seconds),
             },
+            **resolver_kwargs,
         )
         self.trainer["accelerator"] = accelerator
         precision_plugin = xpu_precision_plugin(self.trainer.get("precision"))

@@ -12,7 +12,7 @@ from typing import List, Optional, Union
 
 import torch
 from omegaconf import OmegaConf, listconfig
-from pytorch_lightning import LightningModule, Trainer, seed_everything
+from pytorch_lightning import LightningModule, Trainer
 
 from pytorch_lightning.strategies import DDPStrategy
 
@@ -24,7 +24,11 @@ from boltzgen.task.predict.writer import (
 from boltzgen.task.task import Task
 from boltzgen.utils.pipeline_progress_bar import PipelineProgressBar
 from boltzgen.utils.timing import Timer, flush_rollup
-from boltzgen.utils.device import resolve_trainer_kwargs, xpu_precision_plugin
+from boltzgen.utils.device import (
+    resolve_trainer_kwargs,
+    seed_everything_for_device,
+    xpu_precision_plugin,
+)
 from boltzgen.model.models.boltz import Boltz
 
 
@@ -111,7 +115,11 @@ class Predict(Task):
         torch.set_grad_enabled(False)
 
         if self.seed is not None:
-            seed_everything(self.seed, workers=True)
+            seed_everything_for_device(
+                self.seed,
+                requested_accelerator=(self.trainer or {}).get("accelerator"),
+                workers=True,
+            )
             self.data.predict_set.seed = self.seed
 
         # Experiment with this during training (high or medium)
@@ -170,6 +178,10 @@ class Predict(Task):
             )
 
         # Set up trainer
+        devices = self.trainer.get("devices", devices)
+        if isinstance(devices, listconfig.ListConfig):
+            devices = list(devices)
+            self.trainer = {**self.trainer, "devices": devices}
         num_devices = (
             len(devices)
             if isinstance(devices, (list, listconfig.ListConfig))

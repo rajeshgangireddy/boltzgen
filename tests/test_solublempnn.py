@@ -318,8 +318,13 @@ def test_predictor_uses_device_aware_lightning_strategy(
         lambda precision, accelerator: None,
         raising=False,
     )
+    seeded = []
     monkeypatch.setattr(
-        predict_solublempnn, "seed_everything", lambda seed, workers: None
+        predict_solublempnn,
+        "seed_everything_for_device",
+        lambda seed, *, requested_accelerator, workers: seeded.append(
+            (seed, requested_accelerator, workers)
+        ),
     )
     task = predict_solublempnn.PredictSolubleMPNN(
         data=SimpleNamespace(predict_set=[object()]),
@@ -333,6 +338,7 @@ def test_predictor_uses_device_aware_lightning_strategy(
 
     task.run()
 
+    assert seeded == [(17, "cpu" if requested_accelerator == "cpu" else "xpu", True)]
     if requested_accelerator == "cpu":
         assert resolver_options == {"requested_accelerator": "cpu"}
         assert trainer_options["accelerator"] == "cpu"

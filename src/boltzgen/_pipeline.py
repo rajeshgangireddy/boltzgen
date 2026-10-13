@@ -227,11 +227,15 @@ class BinderDesignPipeline:
         # Handle use_kernels argument. cuEquivariance kernels are CUDA-only,
         # so device capability only matters (and is only queryable) on CUDA.
         selected_device = getattr(args, "device", None)
+        needs_kernels = selected_steps is None or bool(
+            selected_steps
+            & {"design", "inverse_folding", "folding", "design_folding", "affinity"}
+        )
         device_capability = (
             torch.cuda.get_device_capability(getattr(args, "device_index", 0))
-            if selected_device == "cuda"
+            if needs_kernels and selected_device == "cuda"
             else device_capability_safe()
-            if selected_device is None
+            if needs_kernels and selected_device is None
             else None
         )
         use_kernels = None

@@ -12,7 +12,6 @@ from pytorch_lightning import (
     LightningDataModule,
     LightningModule,
     Trainer,
-    seed_everything,
 )
 
 from boltzgen._vendor.ligandmpnn import ProteinMPNN
@@ -25,6 +24,7 @@ from boltzgen.task.task import Task
 from boltzgen.utils.device import (
     empty_cache,
     resolve_trainer_kwargs,
+    seed_everything_for_device,
     xpu_precision_plugin,
 )
 from boltzgen.utils.pipeline_progress_bar import PipelineProgressBar
@@ -329,7 +329,9 @@ class PredictSolubleMPNN(Task):
             trainer_args.pop("precision")
             trainer_args["plugins"] = precision_plugin
         if self.seed is not None:
-            seed_everything(self.seed, workers=True)
+            seed_everything_for_device(
+                self.seed, requested_accelerator=accelerator, workers=True
+            )
         trainer = Trainer(
             default_root_dir=self.output,
             callbacks=callbacks,

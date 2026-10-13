@@ -10,10 +10,12 @@ import math
 import os
 import random
 import re
+import shutil
 import subprocess
 import sys
 import threading
 import time
+import uuid
 import warnings
 from contextlib import contextmanager
 from collections.abc import Callable, Mapping, Sequence
@@ -488,7 +490,12 @@ def _check_request(request: PipelineRequest, graph: tuple[str, ...]) -> None:
         raise PipelineValidationError(
             "additional_filters must be threshold expressions"
         )
-    for item in parse_additional_filters(request.additional_filters) or ():
+    try:
+        additional_filters = parse_additional_filters(request.additional_filters) or ()
+    except ValueError as exc:
+        message = f"additional_filters: {exc}"
+        raise PipelineValidationError(message) from exc
+    for item in additional_filters:
         if not re.fullmatch(
             r"[A-Za-z][A-Za-z0-9_-]*", item["feature"]
         ) or not math.isfinite(item["threshold"]):
@@ -497,7 +504,12 @@ def _check_request(request: PipelineRequest, graph: tuple[str, ...]) -> None:
             )
     if any(not isinstance(item, str) for item in request.size_buckets):
         raise PipelineValidationError("size_buckets must be min-max:count expressions")
-    for item in parse_size_buckets(request.size_buckets) or ():
+    try:
+        size_buckets = parse_size_buckets(request.size_buckets) or ()
+    except ValueError as exc:
+        message = f"size_buckets: {exc}"
+        raise PipelineValidationError(message) from exc
+    for item in size_buckets:
         if item["min"] < 0 or item["min"] > item["max"] or item["num_designs"] < 1:
             raise PipelineValidationError(
                 "size_buckets require valid ranges and positive counts"
@@ -994,18 +1006,21 @@ def _stage_paths(
             sorted(path for path in (base / SCORE_DIR).glob("*") if path.is_file())
         )
     if stage == "analysis":
+        if merged:
+            return tuple(
+                sorted(
+                    path
+                    for directory in {base, root / "intermediate_designs"}
+                    for path in directory.rglob("*")
+                    if path.is_file() or path.is_symlink()
+                )
+            )
         output = [
             base / "aggregate_metrics_analyze.csv",
             base / "ca_coords_sequences.pkl.gz",
         ]
         output += list((base / const.metrics_dirname).glob("*.npz"))
         output += list(base.glob("per_target_metrics_analyze.csv"))
-        if merged:
-            output += list(base.glob("*.cif")) + list(base.glob("*.npz"))
-            output += list((base / const.molecules_dirname).glob("*.pkl"))
-            output += list((base / const.refold_cif_dirname).glob("*.cif"))
-            output += list((base / const.affinity_dirname).glob("*.npz"))
-            output += list((base / SCORE_DIR).glob("*"))
         return tuple(sorted(path for path in output if path.is_file()))
     return tuple(
         sorted(
@@ -1049,9 +1064,14 @@ def _file_ref(root: Path, path: Path, sources: Mapping[str, Any]) -> ArtifactRef
     stem = path.name.removesuffix(".input.json")
     if stem == path.name:
         stem = path.stem
-    if path.parent.name.startswith(("final_", "intermediate_ranked_")):
+    ranked_dir = (
+        path.parent.parent if path.parent.name == "before_refolding" else path.parent
+    )
+    if ranked_dir.name.startswith(("final_", "intermediate_ranked_")):
         stem = re.sub(r"^rank\d+_", "", stem)
-    if path.suffix not in (".cif", ".npz", ".json", ".pkl"):
+    if path.suffix in (".cif", ".pdb") and stem.endswith("_native"):
+        stem = stem.removesuffix("_native")
+    if path.suffix not in (".cif", ".npz", ".json", ".pkl", ".pdb"):
         stem = ""
     lineage = sources.get(stem)
     return ArtifactRef(
@@ -1590,7 +1610,7 @@ def _check_stage_files(
             ),
             _config_path(root, name, receipt.get("revision")),
         )
-        if path.is_file()
+        if path.is_file() or path.is_symlink()
     }
     if set(expected) != observed:
         raise PipelineResumeError(
@@ -1875,7 +1895,7 @@ def _validate_native_spec(request: PipelineRequest) -> None:
 
 
 @contextmanager
-def _run_state(request: PipelineRequest):
+def _run_state(request: PipelineRequest, *, cpu_only: bool = False):
     if not _ACTIVE_RUN.acquire(blocking=False):
         raise RuntimeError(
             "Concurrent BoltzGen API runs cannot share process-global model state"
@@ -1910,7 +1930,7 @@ def _run_state(request: PipelineRequest):
             if request.seed is not None:
                 random.seed(request.seed)
                 np.random.seed(request.seed)
-                if request.device == "cpu":
+                if cpu_only or request.device == "cpu":
                     # Global seeding schedules accelerator seeds we cannot restore.
                     torch.default_generator.manual_seed(request.seed)
                 else:
@@ -2090,7 +2110,10 @@ class BoltzGenEngine:
                         "resume_from must point to this run directory or one of its manifests"
                     )
                 snapshot_source = source
-        with _run_state(request):
+        with _run_state(
+            request,
+            cpu_only=all(stage in ("analysis", "filtering") for stage in chosen),
+        ):
             if resume_from is None:
                 if root.exists() and (not root.is_dir() or any(root.iterdir())):
                     raise PipelineResumeError(
@@ -2380,9 +2403,10 @@ class BoltzGenEngine:
                         f"merge: incompatible {stage} scoring or analysis"
                     )
         output = request.output_dir
-        if output in sources or (
-            output.exists() and (not output.is_dir() or any(output.iterdir()))
-        ):
+        if any(
+            output.is_relative_to(source) or source.is_relative_to(output)
+            for source in sources
+        ) or (output.exists() and (not output.is_dir() or any(output.iterdir()))):
             raise PipelineResumeError("merge: destination must be distinct and empty")
         if (
             request.protocol != reference.protocol
@@ -2406,9 +2430,19 @@ class BoltzGenEngine:
             raise PipelineResumeError(
                 "merge: destination scoring/analysis options differ"
             )
-        output.mkdir(parents=True, exist_ok=True)
-        with _run_state(request):
-            mapping = merge_directories(sources, output)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        staged = output.parent / f".boltzgen-merge-{uuid.uuid4().hex}"
+        staged.mkdir()
+        published = False
+        try:
+            staged_request = replace(request, output_dir=staged)
+            staged_plan = replace(plan, request=staged_request)
+            with _run_state(staged_request, cpu_only=True):
+                try:
+                    mapping = merge_directories(sources, staged)
+                except ValueError as exc:
+                    message = f"merge: incompatible source artifacts: {exc}"
+                    raise PipelineResumeError(message) from exc
             manifest = {
                 "schema_version": _VERSION,
                 "fingerprint": plan.fingerprint,
@@ -2431,12 +2465,35 @@ class BoltzGenEngine:
                 "filter_history": {},
                 "pending_filter_revision": None,
             }
-            _record_stage(plan, manifest, "analysis", None, {}, 0.0, merged=True)
-            results = _stage_results(manifest, output, plan.stages)
-            return PipelineRun(
-                stages=results,
-                resume_handle=output / _MANIFEST,
-                output_dir=output,
-                completed=False,
-                final_csv=None,
+            _record_stage(
+                staged_plan,
+                manifest,
+                "analysis",
+                None,
+                {},
+                0.0,
+                merged=True,
+                persist=False,
             )
+            # The receipt uses staged paths, but the saved request names the final run.
+            manifest["request"] = _serialize_request(request)
+            _write_manifest(staged, manifest)
+            if output.exists():
+                if not output.is_dir() or any(output.iterdir()):
+                    raise PipelineResumeError(
+                        "merge: destination must be distinct and empty"
+                    )
+                staged.chmod(output.stat().st_mode & 0o7777)
+            staged.replace(output)
+            published = True
+        finally:
+            if not published and staged.exists():
+                shutil.rmtree(staged)
+        results = _stage_results(manifest, output, plan.stages)
+        return PipelineRun(
+            stages=results,
+            resume_handle=output / _MANIFEST,
+            output_dir=output,
+            completed=False,
+            final_csv=None,
+        )
