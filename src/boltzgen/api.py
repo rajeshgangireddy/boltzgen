@@ -231,8 +231,18 @@ class SelectedDesign:
     before_refolding_cif: Path | None = None
     esmfold2_cif: Path | None = None
     esmfold2_json: Path | None = None
+    esmfold2_input_json: Path | None = None
+    esmfold2_npz: Path | None = None
     passes_filters: bool = False
     affinity_npz: Path | None = None
+    score_metric: str | None = None
+    scores: Mapping[str, float] = field(default_factory=dict)
+    filter_flags: Mapping[str, bool] = field(default_factory=dict)
+    raw_fields: Mapping[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        for name in ("scores", "filter_flags", "raw_fields"):
+            object.__setattr__(self, name, MappingProxyType(dict(getattr(self, name))))
 
 
 @dataclass(frozen=True, slots=True)
@@ -1307,6 +1317,57 @@ def _validate_outputs(
     return tuple(sorted(ids))
 
 
+def _selected_values(
+    row: Mapping[str, str], design_id: str
+) -> tuple[dict[str, float], dict[str, bool], bool]:
+    scores: dict[str, float] = {}
+    flags: dict[str, bool] = {}
+    for name, value in row.items():
+        if name == "pass_filters" or (
+            name.startswith("pass_") and name.endswith("_filter")
+        ):
+            if value.lower() not in {"true", "false", "1", "0", "1.0", "0.0"}:
+                raise PipelineValidationError(
+                    f"filtering: invalid {name} for {design_id}"
+                )
+            if name != "pass_filters":
+                flags[name] = value.lower() in {"true", "1", "1.0"}
+        elif (
+            name
+            not in {
+                "id",
+                "file_name",
+                "final_rank",
+                "rank",
+                "parent_id",
+                "designed_sequence",
+                "esmfold2_input_hash",
+                "esmfold2_selected_sample",
+                "esmfold2_score_metric",
+            }
+            and value
+        ):
+            try:
+                score = float(value)
+            except ValueError:
+                continue
+            if not math.isfinite(score):
+                raise PipelineValidationError(
+                    f"filtering: non-finite {name} for {design_id}"
+                )
+            scores[name] = score
+    if "pass_filters" not in row:
+        raise PipelineValidationError(
+            f"filtering: missing pass_filters for {design_id}"
+        )
+    passed = row["pass_filters"].lower() in {"true", "1", "1.0"}
+    if flags and passed != all(flags.values()):
+        raise PipelineValidationError(
+            f"filtering: inconsistent filter verdict for {design_id}"
+        )
+    return scores, flags, passed
+
+
 def _selected(
     request: PipelineRequest, sources: Mapping[str, Any], *, revision: str
 ) -> tuple[Path, tuple[SelectedDesign, ...]]:
@@ -1315,9 +1376,7 @@ def _selected(
     csv = directory / f"final_designs_metrics_{request.budget}.csv"
     if not csv.is_file():
         raise PipelineValidationError(f"filtering: missing final selected CSV {csv}")
-    selected = pd.read_csv(
-        csv, dtype={"id": str, "file_name": str}, keep_default_na=False
-    )
+    selected = pd.read_csv(csv, dtype=str, keep_default_na=False)
     all_metrics = directory / "all_designs_metrics.csv"
     if (
         not all_metrics.is_file()
@@ -1367,9 +1426,9 @@ def _selected(
                 f"filtering: selected candidate {design_id} is not from the ranked pool"
             )
         try:
-            rank = int(row["final_rank"])
+            rank = int(float(row["final_rank"]))
             quality = float(row["quality_score"])
-            original_rank = int(ranked.loc[design_id, "final_rank"])
+            original_rank = int(float(ranked.loc[design_id, "final_rank"]))
         except (TypeError, ValueError, OverflowError) as exc:
             raise PipelineValidationError(
                 f"filtering: invalid rank or quality for {design_id}"
@@ -1451,15 +1510,20 @@ def _selected(
         esm_dir = _design_dir(request) / SCORE_DIR
         esm_cif = esm_dir / f"{design_id}.cif"
         esm_json = esm_dir / f"{design_id}.json"
+        esm_input = esm_dir / f"{design_id}.input.json"
+        esm_npz = esm_dir / f"{design_id}.npz"
         if request.protocol in _POLYMER and not (
-            esm_cif.is_file() and esm_json.is_file()
+            esm_cif.is_file()
+            and esm_json.is_file()
+            and esm_input.is_file()
+            and esm_npz.is_file()
         ):
             raise PipelineValidationError(
-                f"filtering: missing paired ESMFold2 structure/score for {design_id}"
+                f"filtering: missing paired ESMFold2 evidence for {design_id}"
             )
         if request.protocol in _POLYMER:
-            _safe_relative(root, esm_cif)
-            _safe_relative(root, esm_json)
+            for evidence in (esm_cif, esm_json, esm_input, esm_npz):
+                _safe_relative(root, evidence)
         affinity_npz = (
             _design_dir(request) / const.affinity_dirname / f"{design_id}.npz"
         )
@@ -1469,14 +1533,11 @@ def _selected(
                     f"filtering: missing paired affinity evidence for {design_id}"
                 )
             _safe_relative(root, affinity_npz)
-        verdicts = [
-            value
-            for key, value in row.items()
-            if key.startswith("pass_") and key.endswith("_filter")
-        ]
-        passed = bool(verdicts) and all(
-            str(v).lower() in ("true", "1", "1.0") for v in verdicts
-        )
+        scores, flags, passed = _selected_values(row, design_id)
+        if score_key not in scores:
+            raise PipelineValidationError(
+                f"filtering: {design_id} has no numeric {score_key}"
+            )
         if not passed:
             logging.getLogger(__name__).warning(
                 "Selected %s did not pass every filter", design_id
@@ -1491,12 +1552,24 @@ def _selected(
                 before_refolding_cif=before,
                 esmfold2_cif=esm_cif if request.protocol in _POLYMER else None,
                 esmfold2_json=esm_json if request.protocol in _POLYMER else None,
+                esmfold2_input_json=(
+                    esm_input if request.protocol in _POLYMER else None
+                ),
+                esmfold2_npz=esm_npz if request.protocol in _POLYMER else None,
                 passes_filters=passed,
                 affinity_npz=(
                     affinity_npz
                     if request.protocol == "protein-small_molecule"
                     else None
                 ),
+                score_metric=(
+                    row["esmfold2_score_metric"]
+                    if request.protocol == "protein-redesign"
+                    else score_key
+                ),
+                scores=scores,
+                filter_flags=flags,
+                raw_fields=row,
             )
         )
     final_dir = directory / f"final_{request.budget}_designs"

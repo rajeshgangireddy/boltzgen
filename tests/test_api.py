@@ -252,7 +252,10 @@ def _make_fake_stage(
                         "quality_score": 1 - (rank - 1) / (len(ids) - 1)
                         if len(ids) > 1
                         else 1.0,
+                        "pass_filters": True,
                         "pass_filter_rmsd_filter": True,
+                        "extra_metric": "0.12345678901234567",
+                        "native_label": f"design {stem}",
                     }
                 )
             pd.DataFrame(pool[:budget]).to_csv(
@@ -350,11 +353,29 @@ def test_public_pipeline_completes_each_protocol_with_stage_writers(
     for selected in run.selected:
         assert selected.source_id == selected.id
         assert selected.source_run == request.output_dir
+        assert selected.score_metric == (
+            PTM_KEY if protocol == "protein-redesign" else expected_score
+        )
+        assert selected.scores[expected_score] == pytest.approx(
+            0.71 if protocol == "protein-small_molecule" else 0.8
+        )
+        assert selected.scores["extra_metric"] == pytest.approx(0.12345678901234567)
+        assert selected.filter_flags == {"pass_filter_rmsd_filter": True}
+        assert selected.passes_filters
+        assert selected.raw_fields["extra_metric"] == "0.12345678901234567"
+        assert selected.raw_fields["native_label"] == f"design {selected.id}"
+        assert selected.raw_fields["pass_filters"] == "True"
+        with pytest.raises(TypeError):
+            selected.scores["extra_metric"] = 0
+        with pytest.raises(TypeError):
+            selected.raw_fields["native_label"] = "changed"
         assert selected.cif.read_text() == f"refold:{selected.id}"
         assert selected.before_refolding_cif.read_text() == f"candidate:{selected.id}"
         if protocol == "protein-small_molecule":
             assert selected.esmfold2_cif is None
             assert selected.esmfold2_json is None
+            assert selected.esmfold2_input_json is None
+            assert selected.esmfold2_npz is None
             assert selected.affinity_npz == (
                 _sample(request) / "affinity_out_npz" / f"{selected.id}.npz"
             )
@@ -369,7 +390,36 @@ def test_public_pipeline_completes_each_protocol_with_stage_writers(
         else:
             assert selected.esmfold2_cif.read_text() == f"esm:{selected.id}"
             assert selected.esmfold2_json.is_file()
+            assert selected.esmfold2_input_json.is_file()
+            assert selected.esmfold2_npz.is_file()
             assert selected.affinity_npz is None
+
+
+@pytest.mark.parametrize(
+    ("column", "value", "message"),
+    [
+        ("pass_filters", "False", "inconsistent filter verdict"),
+        ("pass_filter_rmsd_filter", "not a verdict", "invalid pass_filter_rmsd_filter"),
+        ("extra_metric", "inf", "non-finite extra_metric"),
+    ],
+)
+def test_selected_evidence_rejects_inconsistent_native_fields(
+    inputs: dict,
+    monkeypatch: pytest.MonkeyPatch,
+    column: str,
+    value: str,
+    message: str,
+) -> None:
+    request = PipelineRequest(**inputs)
+    _stub_real_work(monkeypatch, request, [])
+    with BoltzGenEngine() as engine:
+        run = engine.run(engine.plan(request))
+    table = pd.read_csv(run.final_csv, dtype=str, keep_default_na=False)
+    table.loc[0, column] = value
+    table.to_csv(run.final_csv, index=False)
+
+    with pytest.raises(PipelineValidationError, match=message):
+        api._selected(request, {}, revision="v0001")
 
 
 def test_native_affinity_writer_preserves_probability_key_and_shape(
@@ -1509,9 +1559,14 @@ def test_compatible_merge_preserves_source_identity(
         for item in filtered.selected:
             assert item.affinity_npz is None
             assert item.esmfold2_cif.read_text() == f"esm:{item.source_id}"
-            incoming = json.loads(
-                (item.esmfold2_json.parent / f"{item.id}.input.json").read_text()
+            assert item.esmfold2_npz.is_file()
+            assert item.score_metric == SCORE_KEY
+            assert item.scores[SCORE_KEY] == pytest.approx(
+                final.loc[item.id, SCORE_KEY]
             )
+            assert item.raw_fields["native_label"] == f"design {item.id}"
+            assert item.filter_flags["pass_filter_rmsd_filter"]
+            incoming = json.loads(item.esmfold2_input_json.read_text())
             score = json.loads(item.esmfold2_json.read_text())
             assert incoming["design_sha256"] == api._sha256(
                 _sample(merged_request) / f"{item.id}.cif"

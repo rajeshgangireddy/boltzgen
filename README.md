@@ -181,9 +181,16 @@ points to its immutable `filter_runs/vXXXX/pipeline-manifest.json` snapshot;
 record their commit in the manifest; all installations record a package hash.
 Earlier CSVs, CIFs, and snapshots remain intact after refiltering. `SelectedDesign.cif`
 is the final Boltz2 refold; `before_refolding_cif` is its original candidate.
-`esmfold2_cif` and `esmfold2_json` describe the separate ESM-selected
-structure, never the final refold. For ligand selections, `affinity_npz` points
-to the paired `affinity_out_npz` archive; it is `None` for polymers. Ligand
+Each selection carries immutable `raw_fields` (every final CSV column, as
+written), finite numeric `scores`, typed `filter_flags` and `passes_filters`,
+and `score_metric` (the underlying metric for redesign). `rank` is its rank
+in the full pool, not its ordinal among the selected designs. Match
+`result.final_csv` to a filtering-stage file's SHA-256 receipt before
+trusting the selection after files may have changed.
+`esmfold2_cif`, `esmfold2_json`, `esmfold2_input_json`, and `esmfold2_npz`
+describe the paired ESM-selected structure and confidence, never the final
+refold. For ligand selections, `affinity_npz` points to the paired
+`affinity_out_npz` archive; it is `None` for polymers. Ligand
 affinity scores are checked against these archives, including after merge.
 Both scores describe
 the candidate's scoring run, not a new measurement of the exported Boltz2
