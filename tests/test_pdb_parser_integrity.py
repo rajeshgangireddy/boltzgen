@@ -9,9 +9,10 @@ import gemmi
 import numpy as np
 import pytest
 from rdkit import Chem
+from rdkit.Chem import rdDepictor
 
 from boltzgen.data import const
-from boltzgen.data.parse.mmcif import ParsedStructure, mmcif_from_block
+from boltzgen.data.parse.mmcif import ParsedStructure, mmcif_from_block, parse_mmcif
 from boltzgen.data.parse.pdb_parser import parse_pdb
 from boltzgen.data.parse.schema import YamlDesignParser
 from boltzgen.data.tokenize.tokenizer import Tokenizer
@@ -28,6 +29,7 @@ def mols() -> dict[str, Chem.Mol]:
         for letter in letters:
             mol = Chem.MolFromSequence(letter, flavor=flavor)
             assert mol is not None
+            rdDepictor.Compute2DCoords(mol)
             name = mol.GetAtomWithIdx(0).GetPDBResidueInfo().GetResidueName().strip()
             for atom in mol.GetAtoms():
                 atom.SetProp("name", atom.GetPDBResidueInfo().GetName().strip())
@@ -170,6 +172,124 @@ def round_trip(parsed: ParsedStructure, mols: dict[str, Chem.Mol]) -> ParsedStru
         mols,
         use_assembly=False,
     )
+
+
+def ligand_reference(
+    tmp_path: Path, input_format: str, mols: dict[str, Chem.Mol]
+) -> tuple[Path, dict[str, Chem.Mol]]:
+    molecule = Chem.MolFromSmiles("CCO")
+    assert molecule is not None
+    residue = gemmi.Residue()
+    residue.name = "LIG"
+    residue.seqid = gemmi.SeqId(1, " ")
+    residue.entity_type = gemmi.EntityType.NonPolymer
+    residue.subchain = "L"
+    for index, reference in enumerate(molecule.GetAtoms()):
+        atom = gemmi.Atom()
+        atom.name = f"{reference.GetSymbol()}{index + 1}"
+        atom.element = gemmi.Element(reference.GetSymbol())
+        atom.pos = gemmi.Position(index * 1.5, 2, 3)
+        reference.SetProp("name", atom.name)
+        residue.add_atom(atom)
+    chain = gemmi.Chain("L")
+    chain.add_residue(residue)
+    model = gemmi.Model("1")
+    model.add_chain(chain)
+    structure = gemmi.Structure()
+    structure.add_model(model)
+    structure.setup_entities()
+    path = tmp_path / f"ligand.{input_format}"
+    if input_format == "pdb":
+        structure.write_pdb(str(path))
+    else:
+        structure.make_mmcif_block().write_file(str(path))
+    return path, {**mols, "LIG": molecule}
+
+
+def assert_ligand(parsed: ParsedStructure) -> None:
+    chains = parsed.data.chains
+    assert len(chains) == 1
+    assert chains["name"].tolist() == ["L"]
+    assert chains["mol_type"].tolist() == [const.chain_type_ids["NONPOLYMER"]]
+    assert parsed.data.residues["name"].tolist() == ["LIG"]
+    assert parsed.data.atoms["name"].tolist() == ["C1", "C2", "O3"]
+    assert parsed.data.atoms["is_present"].all()
+    np.testing.assert_allclose(
+        parsed.data.coords["coords"], [[0, 2, 3], [1.5, 2, 3], [3, 2, 3]]
+    )
+    assert list(
+        zip(
+            parsed.data.bonds["atom_1"].tolist(),
+            parsed.data.bonds["atom_2"].tolist(),
+        )
+    ) == [(0, 1), (1, 2)]
+
+
+@pytest.mark.parametrize("input_format", ["pdb", "cif"])
+def test_standalone_ligand_preserves_atoms_bonds_and_coordinates(
+    tmp_path: Path, mols: dict[str, Chem.Mol], input_format: str
+) -> None:
+    path, references = ligand_reference(tmp_path, input_format, mols)
+    reader = parse_pdb if input_format == "pdb" else parse_mmcif
+    parsed = reader(path, mols=references, use_assembly=False)
+    assert_ligand(parsed)
+    assert_ligand(round_trip(parsed, references))
+
+    target = YamlDesignParser(tmp_path).parse_boltzgen_schema(
+        "ligand",
+        {
+            "entities": [
+                {"protein": {"id": "A", "sequence": "3"}},
+                {"file": {"path": str(path), "include": [{"chain": {"id": "L"}}]}},
+            ]
+        },
+        references,
+        tmp_path,
+        base_file_path=tmp_path,
+    )
+    assert target.structure.chains["mol_type"].tolist() == [
+        const.chain_type_ids["PROTEIN"],
+        const.chain_type_ids["NONPOLYMER"],
+    ]
+    assert target.structure.residues["name"][-1] == "LIG"
+    np.testing.assert_allclose(
+        target.structure.coords["coords"][-3:], parsed.data.coords["coords"]
+    )
+    reloaded = mmcif_from_block(
+        gemmi.cif.read_string(to_mmcif(target.structure)).sole_block(),
+        references,
+        use_assembly=False,
+    )
+    np.testing.assert_allclose(
+        reloaded.data.coords["coords"][-3:], parsed.data.coords["coords"]
+    )
+
+
+def test_standalone_ligand_allows_empty_polymer_sequence_loop(
+    tmp_path: Path, mols: dict[str, Chem.Mol]
+) -> None:
+    path, references = ligand_reference(tmp_path, "cif", mols)
+    block = gemmi.cif.read_file(str(path)).sole_block()
+    block.init_loop("_entity_poly_seq.", ["entity_id", "num", "mon_id"])
+    assert_ligand(mmcif_from_block(block, references, use_assembly=False))
+
+
+@pytest.mark.parametrize("metadata", ["missing", "empty", "missing_entity"])
+def test_polymer_still_requires_its_sequence_metadata(
+    tmp_path: Path, mols: dict[str, Chem.Mol], metadata: str
+) -> None:
+    path = write_pdb(tmp_path / "polymer.pdb", PROTEIN, {"A": [1, 2, 3, 4, 5, 6]})
+    structure = gemmi.read_structure(str(path))
+    structure.setup_entities()
+    structure.assign_label_seq_id()
+    block = structure.make_mmcif_block()
+    block.find_mmcif_category("_entity_poly_seq.").erase()
+    if metadata != "missing":
+        loop = block.init_loop("_entity_poly_seq.", ["entity_id", "num", "mon_id"])
+        if metadata == "missing_entity":
+            loop.add_row(["other", "1", "ALA"])
+    with pytest.raises(ValueError, match="_entity_poly_seq"):
+        mmcif_from_block(block, mols, use_assembly=False)
 
 
 @pytest.mark.parametrize(

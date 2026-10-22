@@ -371,6 +371,11 @@ entities:
 
 **IMPORTANT:** ⚠️ File references inside a yaml file (e.g. to cif files) are interpreted relative to the directory of the yaml file.
 
+Referenced PDB/mmCIF files may contain a standalone ligand, provided its
+compound definition is available in `moldir`/the CCD. Ligand-only files do not
+need polymer sequence metadata. Polymer sequence validation and the existing
+PDB SEQRES/generated-file fallback are unchanged. Ligand coordinates and
+CCD-defined bonds follow the same parsing path as mixed complexes.
 
 Example highlighting many (not all) functionalities:
 ```yaml

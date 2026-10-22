@@ -680,7 +680,7 @@ def parse_polymer(  # noqa: C901, PLR0915, PLR0912
 
     """
     assert entity_poly_seq is not None
-    
+
     # Since the polymer object already contains the global idx, we don't need to perform the alignment
     sequence = [_entity[1] for _entity in entity_poly_seq]
 
@@ -975,31 +975,29 @@ def mmcif_from_block(  # noqa: C901, PLR0915, PLR0912
     method = get_method(block)
     temperature, ph = get_experiment_conditions(block)
 
-    # We can parse the "_entity_poly_seq" directly from the block.
-    # [[[index_id, mon_id], ...], [[index_id, mon_id], ...], ..]
-    entity_poly_seq_block_idx = block.get_index("_entity_poly_seq.entity_id")
-    eps_loop = block[entity_poly_seq_block_idx].loop
-
-    eps_label_id_idx = eps_loop.tags.index("_entity_poly_seq.num")
-    eps_entity_id_idx = eps_loop.tags.index("_entity_poly_seq.entity_id")
-    eps_mon_id_idx = eps_loop.tags.index("_entity_poly_seq.mon_id")
-
-    entity_poly_seq, curr_seqid_mon = {}, []
-    curr_entity_id = eps_loop[0, eps_entity_id_idx]
-    for i in range(eps_loop.length()):
-        entity_id = eps_loop[i, eps_entity_id_idx]
-        num = eps_loop[i, eps_label_id_idx]
-        mon_id = eps_loop[i, eps_mon_id_idx]
-
-        if entity_id != curr_entity_id:
-            entity_poly_seq[str(curr_entity_id)] = curr_seqid_mon
-            curr_entity_id = entity_id
-            curr_seqid_mon = []
-        curr_seqid_mon.append([int(num), mon_id])
-    entity_poly_seq[str(curr_entity_id)] = curr_seqid_mon
-
-    # Load structure object
     structure = gemmi.make_structure_from_block(block)
+    polymer_entities = {
+        entity.name
+        for entity in structure.entities
+        if entity.entity_type == gemmi.EntityType.Polymer
+    }
+    entity_poly_seq = {}
+    if polymer_entities:
+        sequence = block.find(
+            [
+                "_entity_poly_seq.entity_id",
+                "_entity_poly_seq.num",
+                "_entity_poly_seq.mon_id",
+            ]
+        )
+        if not sequence or len(sequence) == 0:
+            msg = "Polymer entities require a nonempty _entity_poly_seq category."
+            raise ValueError(msg)
+        for entity_id, num, mon_id in sequence:
+            entity_poly_seq.setdefault(entity_id, []).append([int(num), mon_id])
+        if missing := polymer_entities - entity_poly_seq.keys():
+            msg = f"Missing _entity_poly_seq for polymer entities: {sorted(missing)}"
+            raise ValueError(msg)
 
     structure.merge_chain_parts()
 
