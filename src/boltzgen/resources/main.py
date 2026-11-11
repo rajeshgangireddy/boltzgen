@@ -1,10 +1,8 @@
 import sys
 from typing import List
-import hydra
 import omegaconf
 
-
-from boltzgen.task.task import Task
+from boltzgen._pipeline import run_task
 
 
 def main(config: str, args: List) -> None:
@@ -36,15 +34,7 @@ def main(config: str, args: List) -> None:
     config = omegaconf.OmegaConf.load(config)
     config = omegaconf.OmegaConf.merge(config, args)
 
-    # Instantiate the task
-    task = hydra.utils.instantiate(config)
-
-    if not isinstance(task, Task):
-        msg = "Config must be an instance of Task."
-        raise TypeError(msg)
-
-    # Run the task
-    task.run(config)
+    run_task(config)
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@
 
 from types import SimpleNamespace
 import pickle
+from pathlib import Path
 
 import pytest
 import yaml
@@ -97,3 +98,56 @@ def test_distinct_stems_pass_actual_cli_checks_and_dataset(tmp_path, molecules, 
     assert config.skip_offset == 0
     assert len(module.predict_set) == 2
     assert [module.predict_set[index]["id"] for index in range(2)] == ["alpha", "beta"]
+
+
+@pytest.mark.parametrize("entrypoint", ["in_process", "subprocess_script"])
+@pytest.mark.parametrize("fail_after_loading", [False, True])
+def test_task_preserves_atom_properties_for_multiprocess_loader(
+    tmp_path: Path,
+    molecules: dict[str, Chem.Mol],
+    monkeypatch: pytest.MonkeyPatch,
+    entrypoint: str,
+    fail_after_loading: bool,
+) -> None:
+    from omegaconf import OmegaConf
+
+    from boltzgen import _pipeline
+    from boltzgen.resources import main as script
+    from boltzgen.task.task import Task
+
+    design = tmp_path / "input.yaml"
+    write_spec(design)
+    assert molecules
+    config = make_config([design], tmp_path / "output", tmp_path, reuse=False)
+    module = data_from_yaml.FromYamlDataModule(
+        config, batch_size=1, num_workers=1, pin_memory=False
+    )
+
+    class LoaderTask(Task):
+        def run(self, _config: object) -> None:
+            assert next(iter(module.predict_dataloader()))["id"] == ["input"]
+            if fail_after_loading:
+                raise ValueError("expected failure")
+
+    monkeypatch.setattr(_pipeline.hydra.utils, "instantiate", lambda _: LoaderTask())
+    task_config = OmegaConf.create({})
+    config_file = tmp_path / "task.yaml"
+    OmegaConf.save(task_config, config_file)
+    previous = Chem.GetDefaultPickleProperties()
+    try:
+        Chem.SetDefaultPickleProperties(Chem.PropertyPickleOptions.NoProps)
+
+        def execute() -> None:
+            if entrypoint == "in_process":
+                _pipeline.run_task(task_config)
+            else:
+                script.main(str(config_file), [])
+
+        if fail_after_loading:
+            with pytest.raises(ValueError, match="expected failure"):
+                execute()
+        else:
+            execute()
+        assert Chem.GetDefaultPickleProperties() == Chem.PropertyPickleOptions.NoProps
+    finally:
+        Chem.SetDefaultPickleProperties(previous)

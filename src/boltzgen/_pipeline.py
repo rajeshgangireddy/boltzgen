@@ -1241,14 +1241,22 @@ def merge_directories(
 
 def run_task(config: omegaconf.DictConfig) -> None:
     """Instantiate and run one trusted built-in Hydra task in this process."""
-    task = hydra.utils.instantiate(config)
+    pickle_properties = Chem.GetDefaultPickleProperties()
     try:
-        if not isinstance(task, Task):
-            raise TypeError("Config must be an instance of Task.")
-        task.run(config)
+        # Python 3.14's forkserver serializes RDKit molecules for data-loader workers.
+        Chem.SetDefaultPickleProperties(
+            pickle_properties | Chem.PropertyPickleOptions.AllProps
+        )
+        task = hydra.utils.instantiate(config)
+        try:
+            if not isinstance(task, Task):
+                raise TypeError("Config must be an instance of Task.")
+            task.run(config)
+        finally:
+            del task
+            gc.collect()
     finally:
-        del task
-        gc.collect()
+        Chem.SetDefaultPickleProperties(pickle_properties)
 
 
 def configure_pipeline(
