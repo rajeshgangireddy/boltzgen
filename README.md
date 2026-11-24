@@ -118,7 +118,7 @@ docker build --build-arg BACKEND=cuda --build-arg DOWNLOAD_WEIGHTS=true -t boltz
 
 `boltzgen.api` runs the built-in Hydra tasks in process. Supply local weights and
 the molecule archive; it never downloads weights or selects a fallback device.
-Polymer protocols also need a Python 3.12 ESMFold2 environment with `esm==3.4.1.post1`
+Polymer protocols also need a Python 3.12 ESMFold2 environment with `esm==3.5.0`
 and the pinned ESMFold2, ESMC-6B, and CCD files already in the Hugging Face cache.
 Pass the environment's `bin/python` path, not its resolved system interpreter.
 

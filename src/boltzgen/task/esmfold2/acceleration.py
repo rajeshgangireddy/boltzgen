@@ -28,9 +28,14 @@ from boltzgen.task.esmfold2.contract import ACCELERATION_REVISION, validate_acce
 
 logger = logging.getLogger(__name__)
 
+# Digests of the pinned esm 3.5.0 sources. `sample` also accepts the XPU fork's variant, whose only
+# difference is deriving the autocast device type from the tensor instead of hardcoding "cuda".
 _SOURCE_HASHES = {
-    "sample": "0046a1ab71e1c3418cdb9137c4dd5552fc595c2f762541648f436936f1363a98",
-    "forward": "54fada346abf221ec26482aa52f27a7ab801766cbee9d92740a383049026ab56",
+    "sample": (
+        "293399a050cd806703d6ec1aecb56c5c8ec31b1809b49e7565d1d6b7f4e5baac",
+        "8e974179728b986f927dcf1c399915973962d6b2214607f358553e01a78145cf",
+    ),
+    "forward": ("f93374560484411a3d58aed1c36421649451be5772f4e1368904e46d99e4b677",),
 }
 
 
@@ -94,7 +99,7 @@ def acceleration_context(model, options: dict):
 
 
 def check_source(
-    function: Callable, expected: str, *, inference_mode: bool = False
+    function: Callable, expected: str | tuple[str, ...], *, inference_mode: bool = False
 ) -> None:
     """Refuse a port against different upstream code, including local patches."""
     if type(function) is not FunctionType:
@@ -144,7 +149,7 @@ def check_source(
         .replace(", type_params=[]", "")
         .encode()
     ).hexdigest()
-    if digest != expected:
+    if digest not in ((expected,) if isinstance(expected, str) else expected):
         raise ValueError(f"Unsupported ESMFold2 source for {function.__qualname__}")
 
 
@@ -198,15 +203,8 @@ def cached_attention(
     module, x: Tensor, attention_params: tuple, cache: MaskCache
 ) -> Tensor:
     """Native SWA attention with its constant SDPA mask hoisted (kit U1)."""
-    from esm.models.esmfold2.layers import apply_rotary_emb_3d, qk_norm
-
-    batch, atoms = x.shape[:2]
     cos, sin = attention_params[:2]
-    qkv = module.Wqkv(x).view(batch, atoms, 3, module.n_heads, module.head_dim)
-    q, k, v = qkv.permute(2, 0, 1, 3, 4).unbind(0)
-    q, k = qk_norm(q), qk_norm(k)
-    q, k = apply_rotary_emb_3d(q, cos, sin), apply_rotary_emb_3d(k, cos, sin)
-    input_dtype = q.dtype
+    q, k, v, input_dtype = module._project_qkv(x, cos, sin)
     if q.dtype not in (torch.float16, torch.bfloat16):
         q, k, v = q.bfloat16(), k.bfloat16(), v.bfloat16()
     allowed, valid = cache.get(attention_params, q, module.half_window)
@@ -218,7 +216,7 @@ def cached_attention(
         scale=module.scale,
     ).transpose(1, 2)
     out = out * valid.unsqueeze(-1).unsqueeze(-1)
-    out = out.to(input_dtype).reshape(batch, atoms, -1)
+    out = out.to(input_dtype).reshape(*x.shape[:2], -1)
     return module.out_proj(out * torch.sigmoid(module.gate_proj(x)))
 
 

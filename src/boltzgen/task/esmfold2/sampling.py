@@ -2,13 +2,16 @@
 # SPDX-License-Identifier: Apache-2.0
 """Pinned ESM sampler with the public Anthropic kit's scalar-sync removal.
 
-Modified from the Apache-2.0-licensed layers.py in esm 3.4.1.post1.
+Modified from the Apache-2.0-licensed layers.py in esm 3.5.0.
 See NOTICE.md and LICENSE.anthropic for the license text. The schedule, RNG
 draws and numerical operations are unchanged; only loop-invariant GPU-to-host
 transfers move.
 """
 
 import torch
+from collections.abc import Callable
+from typing import Any
+
 from torch import Tensor
 import torch.nn.functional as F
 
@@ -40,10 +43,14 @@ def sample_without_scalar_sync(
     step_scale: float | None = None,
     return_atom_repr: bool = False,
     use_inference_cache: bool = True,
+    pair_conditioning: Tensor | None = None,
+    pair_bias_rows: list[Tensor] | None = None,
+    replica_sync: Callable[[Tensor], Tensor] | None = None,
 ) -> dict[str, Tensor | None]:
     """Diffusion sampling (Algorithm 18).
 
-    ``num_sampling_steps`` sets the native schedule length before applying
+    ``pair_conditioning``, ``pair_bias_rows`` and ``replica_sync`` behave as in
+    the native sampler. ``num_sampling_steps`` sets the native schedule length before applying
     ``max_inference_sigma``. The cap removes high-sigma entries, so fewer
     denoising steps may run. This adapter preserves that native behavior.
     """
@@ -51,7 +58,18 @@ def sample_without_scalar_sync(
     device = s_inputs.device
     target_batch = s_inputs.shape[0] * num_diffusion_samples
 
-    inference_cache: dict[str, Tensor] | None = {} if use_inference_cache else None
+    inference_cache: dict[str, Any] | None = {} if use_inference_cache else None
+    if pair_conditioning is not None:
+        if inference_cache is None:
+            raise ValueError("pair_conditioning needs use_inference_cache=True")
+        inference_cache["z"] = pair_conditioning
+    if pair_bias_rows is not None:
+        if inference_cache is None:
+            raise ValueError("pair_bias_rows needs use_inference_cache=True")
+        # A cached "z" skips the conditioning's pair branch; the row DiT
+        # reads the biases instead.
+        inference_cache["z"] = pair_bias_rows[0]
+        inference_cache["pair_bias_rows"] = pair_bias_rows
 
     steps = (
         self.inference_num_steps
@@ -70,6 +88,8 @@ def sample_without_scalar_sync(
     x = schedule[0] * torch.randn(
         target_batch, n_atoms, 3, device=device, dtype=torch.float32
     )
+    if replica_sync is not None:
+        x = replica_sync(x)
     atom_mask = ref_mask.repeat_interleave(num_diffusion_samples, 0).float()
 
     gammas = torch.where(
@@ -97,14 +117,16 @@ def sample_without_scalar_sync(
         t_hat_val = sigma_tm_val * (1.0 + float(gamma))
         eps_std = lam * max(t_hat_val**2 - sigma_tm_val**2, 0.0) ** 0.5
         x_noisy = x + eps_std * torch.randn_like(x)
+        if replica_sync is not None:
+            x_noisy = replica_sync(x_noisy)
 
         request_atom_repr = return_atom_repr and step_idx == num_steps - 1
 
         dm_out = self.diffusion_module(
             x_noisy=x_noisy,
-            t_hat=torch.full(
-                (target_batch,), t_hat_val, device=device, dtype=torch.float32
-            ),
+            # One element: the module broadcasts it, and from its length it
+            # knows every sample shares the noise level.
+            t_hat=torch.full((1,), t_hat_val, device=device, dtype=torch.float32),
             ref_pos=ref_pos,
             ref_charge=ref_charge,
             ref_mask=ref_mask,
@@ -134,7 +156,7 @@ def sample_without_scalar_sync(
             diff_atom_intermediates = dm_out.get("atom_intermediates")
 
         # Reverse diffusion alignment (Kabsch)
-        with torch.autocast(device_type=device.type, enabled=False):
+        with torch.autocast(device_type=x_noisy.device.type, enabled=False):
             x_noisy = self._weighted_rigid_align(
                 x_noisy.float(), x_denoised.float(), atom_mask, atom_mask
             )

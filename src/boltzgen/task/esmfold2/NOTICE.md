@@ -6,13 +6,13 @@ https://github.com/anthropics/uplifting-biomolecular-modeling/blob/f4f62fa6592ae
 
 Copyright 2026 Anthropic, PBC. Licensed under Apache-2.0; see
 `LICENSE.anthropic`. This is a modified adaptation for native
-`esm.models.esmfold2` in ESM 3.4.1.post1. It uses instance-local wrappers,
+`esm.models.esmfold2` in ESM 3.5.0. It uses instance-local wrappers,
 private graph pools, per-request lifetimes, and the original numerical backend.
 It does not bundle the kit's fast kernels, old Transformers fork, or model weights.
 
 `sampling.py` and the attention expression in `acceleration.py` are modified
-from `esm/models/esmfold2/layers.py` in ESM 3.4.1.post1 (PyPI wheel SHA-256
-`f9e62b363519860d27762989871a531cdbd02d69c824cc8c8a1047b16dce3ef6`).
+from `esm/models/esmfold2/layers.py` in ESM 3.5.0 (PyPI wheel SHA-256
+`86a728b874e3025cb98cb4720c8496f0f5a5241b609d8534a3ca8da724496738`).
 The source file carries Copyright 2026 Biohub. All rights reserved, and an
 Apache-2.0 header; the Apache-2.0 text is included in `LICENSE.anthropic`.
 The wheel's package-level MIT notice is also retained in `LICENSE.esm`;

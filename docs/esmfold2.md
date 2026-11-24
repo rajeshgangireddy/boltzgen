@@ -98,7 +98,7 @@ and a final message announces when the model is ready for scoring.
 
 For an administrator-managed or pre-provisioned offline installation,
 `--esmfold2_python /path/to/python` or `BOLTZGEN_ESMFOLD2_PYTHON` remains an optional
-override. That interpreter needs `esm==3.4.1.post1`, the dependencies in
+override. That interpreter needs `esm==3.5.0`, the dependencies in
 `src/boltzgen/resources/runtime/esmfold2.txt`, and a Torch build matching the
 active accelerator (the XPU runtime is provisioned with uv's `--torch-backend
 xpu` option); it does not need BoltzGen installed. The worker loads only
@@ -109,7 +109,7 @@ Pinned artifacts:
 
 | Artifact | Revision |
 | --- | --- |
-| `esm` | `3.4.1.post1` |
+| `esm` | `3.5.0` |
 | `biohub/ESMFold2` (full 2021) and CCD | `8fc3ff471022fdce52c77030685eb775de0c00a3` |
 | `biohub/ESMC-6B` | `af1602ba7406f521b11bf8f81d52af378cde09e4` |
 
